@@ -171,6 +171,14 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - Removed scoped dark-mode overrides that were being minified into unintended global `html.dark` CSS.
   - Verification passed: `corepack pnpm typecheck`, `corepack pnpm build`, `npm run check:api`, and `npm test`.
   - Built assets now contain `pulse-input`, `默认账号：admin / change-me`, and `请输入账号和密码`; login CSS no longer contains unintended `html.dark` rules.
+- Committed and pushed `3bd3485 Stabilize PulseDeck login form rendering` to `origin/main`.
+- GitHub Actions run `27067475841` for commit `3bd3485`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+- `docker compose pull`: pulled the GHCR image after the workflow completed.
+- `docker compose up -d`: recreated and started `pulsedeck-panel`; no local Docker image build was run.
+- `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+- `GET http://127.0.0.1:14770/api/v1/health`: passed with `name: PulseDeck` and `port: 14770`.
+- Post-deploy login smoke with `admin / change-me` passed through the Soybean-compatible auth contract and returned `R_SUPER`.
+- Deployment asset check found `pulse-input`, `默认账号：admin / change-me`, and `请输入账号和密码` in the served login assets, and found no `html.dark` login CSS rule.
 
 ## Next Targets
 
