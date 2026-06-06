@@ -20,3 +20,16 @@ PulseDeck is split into three parts:
 - SQLite/Postgres and distributed workers are intentionally deferred.
 - Advanced provider import and sing-box orchestration are deferred until probe enrollment and dashboard reliability are stable.
 - Cloudflare-specific functionality is not part of the first PulseDeck product surface.
+
+## Product Direction
+
+PulseDeck is positioned as a lightweight personal node and subscription management panel. It should prioritize a dependable single-operator workflow over multi-tenant billing, enterprise monitoring, or heavy airport features.
+
+The detailed product and Agent roadmap is maintained in [product-agent-plan.md](./product-agent-plan.md).
+
+Near-term architecture targets:
+
+- Node create/list/delete with related Agent and command cleanup.
+- Agent WebSocket channel for real-time heartbeat, traffic samples, and remote command dispatch.
+- Browser SSE endpoint for streamed command output.
+- Recent traffic rates in memory, cumulative traffic persisted, and optional SQLite only after the JSON store becomes a bottleneck.

@@ -4,6 +4,12 @@ dist/
 coverage/
 .data/
 *.log
+pulsedeck.json
+pulsedeck-*.json
+*.db
+*.sqlite
+*.sqlite3
+*.tmp
 .env.local
 .env.*.local
 !.env.example

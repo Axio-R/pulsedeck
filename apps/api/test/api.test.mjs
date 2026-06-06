@@ -77,6 +77,49 @@ test('node enrollment install script is LXC and multi-arch aware', async () => {
   }
 });
 
+test('created nodes can be deleted with related commands purged', async () => {
+  const app = await startServer();
+  try {
+    const login = await request(app.base, '/api/v1/auth/login', {
+      method: 'POST',
+      body: { username: 'admin', password: 'change-me' }
+    });
+    const auth = { authorization: `Bearer ${login.body.token}` };
+
+    const created = await request(app.base, '/api/v1/nodes', {
+      method: 'POST',
+      headers: auth,
+      body: { name: 'delete-me', region: 'test' }
+    });
+    assert.equal(created.res.status, 201);
+
+    const command = await request(app.base, `/api/v1/nodes/${created.body.id}/commands`, {
+      method: 'POST',
+      headers: auth,
+      body: { type: 'probe' }
+    });
+    assert.equal(command.res.status, 201);
+
+    const deleted = await request(app.base, `/api/v1/nodes/${created.body.id}`, {
+      method: 'DELETE',
+      headers: auth
+    });
+    assert.equal(deleted.res.status, 200);
+    assert.equal(deleted.body.deleted, true);
+    assert.equal(deleted.body.removedCommands, 1);
+
+    const nodes = await request(app.base, '/api/v1/nodes', { headers: auth });
+    assert.equal(nodes.res.status, 200);
+    assert.equal(nodes.body.items.some((node) => node.id === created.body.id), false);
+
+    const commands = await request(app.base, '/api/v1/commands', { headers: auth });
+    assert.equal(commands.res.status, 200);
+    assert.equal(commands.body.items.some((item) => item.nodeId === created.body.id), false);
+  } finally {
+    await app.close();
+  }
+});
+
 test('soybean auth contract returns wrapped login token and user info', async () => {
   const app = await startServer();
   try {

@@ -64,6 +64,40 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 
 ## Log
 
+### 2026-06-07
+
+- User clarified PulseDeck positioning: lightweight personal node and subscription management panel, not a heavy multi-tenant operations platform.
+- New planning requirements captured:
+  - Create a complete project function design and staged roadmap.
+  - Design the Agent architecture and features around real-time traffic monitoring, low-overhead collection, bidirectional WebSocket control, remote sing-box operations, and streamed command output.
+  - Real-time traffic requirements include persistent file descriptors, fixed stack buffers/low-allocation sampling, WebSocket rate push, counter wrap/reboot handling, and reliable traffic accounting.
+  - Remote command requirements include reset node subscription link, reinstall/update sing-box, command execution progress, and streamed output suitable for SSE display in the panel.
+  - Audit whether local smoke/deployment data is tracked in git.
+  - Add or expose deletion for created nodes if missing.
+- Initial repository audit:
+  - `git status --short`: clean before new edits.
+  - Tracked files do not include `.data/`, `dist/`, `node_modules/`, runtime JSON data, or smoke node records.
+  - `.env`, `.env.prod`, and `.env.test` are tracked and need review to ensure they only contain non-secret template values.
+  - Existing API supports deleting subscription Profiles but not created nodes yet.
+- Product and Agent planning document added:
+  - Created `docs/product-agent-plan.md` for lightweight personal panel positioning, function modules, Agent architecture, real-time traffic design, WebSocket protocol, SSE command output, staged roadmap, security rules, and repository hygiene.
+  - Clarified that strict zero-allocation per-second traffic sampling cannot be guaranteed in the current Node.js Agent; the planned strict path is a future native Go/Rust telemetry collector built by GitHub Actions, while the current Agent remains a low-allocation control/runtime layer.
+  - Updated `docs/architecture.md`, `docs/agent-compatibility.md`, and `docs/ui-plan.md` to reference the new direction.
+- Repository hygiene update:
+  - Reviewed tracked `.env` files; they contain non-secret frontend build defaults only.
+  - Added ignore rules for runtime JSON, SQLite/database files, and temporary files to reduce the chance of committing local deployment/smoke data later.
+- Node deletion implementation started:
+  - Added `DELETE /api/v1/nodes/{nodeId}` to remove the node and cleanup related Agent/command records.
+  - Added frontend API helper and node page delete confirmation actions in table/card views.
+  - Added API test coverage for deleting a node and purging related commands.
+- Verification after planning and node deletion work:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 6 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - Diff scan confirms no `dist/`, `node_modules/`, `.data/`, runtime JSON, or smoke node data is staged for commit.
+  - Token scan found no GitHub token or real panel IP; only the documented default password `change-me` remains in template/test files.
+
 ### 2026-06-06
 
 - User requested a fresh rebuild/new project instead of continuing RelayDeck UI patches.

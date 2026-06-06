@@ -479,6 +479,25 @@ async function handleApi(req, res, store, url) {
     });
   }
 
+  if (method === 'DELETE' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'nodes' && segments[3]) {
+    const nodeId = segments[3];
+    const node = data.nodes.find((item) => item.id === nodeId);
+    if (!node) return notFound(res);
+    let removedAgents = 0;
+    let removedCommands = 0;
+    await store.update((draft) => {
+      const agentIds = new Set(draft.agents.filter((agent) => agent.nodeId === nodeId).map((agent) => agent.id));
+      const beforeAgents = draft.agents.length;
+      const beforeCommands = draft.commands.length;
+      draft.nodes = draft.nodes.filter((item) => item.id !== nodeId);
+      draft.agents = draft.agents.filter((agent) => agent.nodeId !== nodeId);
+      draft.commands = draft.commands.filter((command) => command.nodeId !== nodeId && !agentIds.has(command.agentId));
+      removedAgents = beforeAgents - draft.agents.length;
+      removedCommands = beforeCommands - draft.commands.length;
+    });
+    return sendJson(res, 200, { deleted: true, removedAgents, removedCommands });
+  }
+
   if (method === 'POST' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'nodes' && segments[3] && segments[4] === 'commands') {
     const nodeId = segments[3];
     const body = await readJson(req);

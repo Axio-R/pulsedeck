@@ -123,6 +123,10 @@ export function createPulseNode(body: { name: string; region?: string; tags?: st
   return pulseFetch<PulseNode>('/nodes', { method: 'POST', body });
 }
 
+export function deletePulseNode(id: string) {
+  return pulseFetch<{ deleted: boolean; removedAgents: number; removedCommands: number }>(`/nodes/${id}`, { method: 'DELETE' });
+}
+
 export function queuePulseCommand(nodeId: string, type: string, payload: Record<string, unknown> = {}) {
   return pulseFetch<PulseCommand>(`/nodes/${nodeId}/commands`, { method: 'POST', body: { type, payload } });
 }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onMounted, reactive, ref } from 'vue';
-import { NButton, NTag } from 'naive-ui';
-import { createPulseNode, fetchPulseNodes, queuePulseCommand, type PulseNode } from '@/service/api';
+import { NButton, NPopconfirm, NTag } from 'naive-ui';
+import { createPulseNode, deletePulseNode, fetchPulseNodes, queuePulseCommand, type PulseNode } from '@/service/api';
 
 const loading = ref(false);
 const nodes = ref<PulseNode[]>([]);
@@ -42,11 +42,19 @@ const columns = computed(() => [
   {
     title: '操作',
     key: 'actions',
-    width: 190,
+    width: 250,
     render(row: PulseNode) {
       return h('div', { class: 'table-actions' }, [
         h(NButton, { size: 'small', onClick: () => copyInstall(row) }, { default: () => '复制安装' }),
-        h(NButton, { size: 'small', onClick: () => queue(row, 'probe') }, { default: () => '探测' })
+        h(NButton, { size: 'small', onClick: () => queue(row, 'probe') }, { default: () => '探测' }),
+        h(
+          NPopconfirm,
+          { onPositiveClick: () => removeNode(row) },
+          {
+            default: () => `删除节点 ${row.name}？`,
+            trigger: () => h(NButton, { size: 'small', type: 'error', secondary: true }, { default: () => '删除' })
+          }
+        )
       ]);
     }
   }
@@ -85,6 +93,12 @@ async function copyInstall(node: PulseNode) {
 async function queue(node: PulseNode, type: string) {
   await queuePulseCommand(node.id, type);
   window.$message?.success('命令已下发到队列');
+}
+
+async function removeNode(node: PulseNode) {
+  const result = await deletePulseNode(node.id);
+  nodes.value = nodes.value.filter(item => item.id !== node.id);
+  window.$message?.success(`节点已删除，清理 Agent ${result.removedAgents} 个、命令 ${result.removedCommands} 条`);
 }
 
 onMounted(loadData);
@@ -136,6 +150,12 @@ onMounted(loadData);
             <NButton size="small" @click="queue(node, 'probe')">立即探测</NButton>
             <NButton size="small" @click="queue(node, 'diagnostics')">诊断</NButton>
             <NButton size="small" @click="queue(node, 'sing-box-render')">渲染配置</NButton>
+            <NPopconfirm @positive-click="removeNode(node)">
+              <template #trigger>
+                <NButton size="small" type="error" secondary>删除</NButton>
+              </template>
+              删除节点 {{ node.name }}？
+            </NPopconfirm>
           </NSpace>
         </NCard>
       </NGi>
