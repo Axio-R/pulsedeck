@@ -94,7 +94,20 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - No local Docker image build was performed.
 - GHCR workflow run `27069058020` for commit `d5f24a5` failed before image build:
   - Failure cause: `rust:1.87-alpine` has no `linux/arm/v7` manifest for a separate `FROM --platform=linux/arm/v7` build stage.
-  - Fix in progress: compile `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, and `armv7-unknown-linux-musleabihf` from one Rust Alpine stage and package them as `linux-x64`, `linux-arm64`, and `linux-armv7l`.
+  - Fix applied: compile `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, and `armv7-unknown-linux-musleabihf` from one Rust Alpine stage and package them as `linux-x64`, `linux-arm64`, and `linux-armv7l`.
+- Committed and pushed `45e0997 Fix Rust Agent cross target image build`.
+- GitHub Actions run `27069171426` for commit `45e0997`: build job completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+- `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+- `docker compose up -d`: recreated and started `pulsedeck-panel`.
+- `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+- `GET http://127.0.0.1:14770/api/v1/health`: passed with `name: PulseDeck` and `port: 14770`.
+- Deployed image runtime verification passed:
+  - Container contains `/app/agent-dist/linux-x64/pulsedeck-agent`, `/app/agent-dist/linux-arm64/pulsedeck-agent`, and `/app/agent-dist/linux-armv7l/pulsedeck-agent`.
+  - Login with `admin / change-me` succeeded.
+  - Created and deleted a temporary smoke node successfully.
+  - Install script includes Rust Agent markers: `PULSEDECK_AGENT_TARGET`, `pulsedeck-agent`, `runtime/$PULSEDECK_AGENT_TARGET`, `PK`, `pk status`, and `RK`.
+  - Install script does not include stale JavaScript runtime markers: `Node.js runtime`, `node-v`, or `pulsedeck-agent.mjs`.
+  - Runtime endpoint byte checks passed: `linux-x64` 610768 bytes, `linux-arm64` 526368 bytes, `linux-armv7l` 553340 bytes.
 - User clarified PulseDeck positioning: lightweight personal node and subscription management panel, not a heavy multi-tenant operations platform.
 - New planning requirements captured:
   - Create a complete project function design and staged roadmap.
