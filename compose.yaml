@@ -1,0 +1,18 @@
+services:
+  panel:
+    image: ghcr.io/axio-r/pulsedeck:latest
+    container_name: pulsedeck-panel
+    restart: unless-stopped
+    environment:
+      PULSEDECK_HOST: 0.0.0.0
+      PULSEDECK_PORT: 14770
+      PULSEDECK_DATA_FILE: /data/pulsedeck.json
+      PULSEDECK_ADMIN_USER: admin
+      PULSEDECK_ADMIN_PASSWORD: change-me
+    ports:
+      - "14770:14770"
+    volumes:
+      - pulsedeck-data:/data
+
+volumes:
+  pulsedeck-data:

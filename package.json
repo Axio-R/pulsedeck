@@ -1,0 +1,27 @@
+{
+  "name": "pulsedeck",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Probe-style node operations panel with subscription distribution.",
+  "scripts": {
+    "start": "node apps/api/src/main.mjs",
+    "dev": "PULSEDECK_ENV=development node --watch apps/api/src/main.mjs",
+    "agent": "node apps/agent/src/main.mjs",
+    "test": "node --test",
+    "check": "node --check apps/api/src/main.mjs && node --check apps/api/src/store.mjs && node --check apps/api/src/install-script.mjs && node --check apps/agent/src/main.mjs",
+    "build:web": "vite build --config apps/web/vite.config.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.7",
+    "vue": "^3.5.13",
+    "naive-ui": "^2.41.0",
+    "pinia": "^2.3.0",
+    "vue-router": "^4.5.0",
+    "@vicons/ionicons5": "^0.13.0"
+  }
+}
