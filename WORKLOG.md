@@ -144,6 +144,12 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - Fixed the frontend password rule to allow 6-64 characters from letters, numbers, and common safe symbols `._-@#$%+!`.
   - Updated Chinese and English validation messages so the UI no longer says passwords are limited to letters, numbers, and underscores.
   - Verification after the fix: `corepack pnpm typecheck`, `corepack pnpm build`, `npm run check:api`, and `npm test` all passed.
+  - Committed and pushed `85e8734 Fix Soybean login password validation` to `origin/main`.
+  - GitHub Actions run `27066493658` for commit `85e8734`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+  - `docker compose pull` and `docker compose up -d`: deployed the GHCR image for `85e8734`; no local Docker image build was run.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed after deployment.
+  - Deployment asset check found the old `6-18` password text absent and the new `6-64` password text present in built assets.
+  - Post-deploy login smoke with `admin / change-me` passed through the Soybean-compatible auth contract and returned `R_SUPER`.
 
 ## Next Targets
 
