@@ -45,6 +45,17 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - GHCR image target: `ghcr.io/axio-r/pulsedeck:latest`.
   - No local Docker image build.
 
+## Product Target
+
+- One-command Rust Agent deployment, with automatic node information reporting after enrollment.
+- Mainstream sing-box protocol management: VMess, VLESS, Trojan, Shadowsocks, Hysteria2, Tuic, AnyTLS, and practical variants.
+- Real-time node status monitoring and traffic accounting.
+- Remote link reset and remote protocol add/delete.
+- Multi-channel offline alerts, traffic threshold alerts, and automatic subscription removal/disable when thresholds are exceeded.
+- Per-node protocol and port customization.
+- GeoIP/Geosite integration for automatic region detection during node create/enroll, with manual correction when detection is wrong.
+- Automatic IP mode detection, including IPv4-only, IPv6-only, dual-stack, and WARP IPv4 plus IPv6 style hosts.
+
 ## Progress
 
 - [x] Created independent project directory `/root/pulsedeck`.
@@ -62,6 +73,11 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 - [x] Replace the temporary hand-written Vue shell with SoybeanAdmin project structure.
 - [x] Finish local SoybeanAdmin-based sing-box panel verification.
 - [x] Push, wait for GHCR, and redeploy.
+- [x] Replace Node Agent with GHCR-built Rust Agent binaries.
+- [x] Add protocol/network/traffic/alert control-plane model for the target sing-box panel.
+- [ ] Implement real Rust Agent sing-box executor for protocol add/delete, link reset, and sing-box install/update.
+- [ ] Integrate real GeoIP/Geosite databases instead of placeholder region lookup.
+- [ ] Add WebSocket real-time traffic push and SSE command output streaming.
 
 ## Log
 
@@ -99,6 +115,20 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm typecheck`: passed.
   - `corepack pnpm build`: passed.
   - No local Docker image build was performed.
+- Committed and pushed `6a0f98c Add protocol and network control model` to `origin/main`.
+- GitHub Actions run `27069952616` for commit `6a0f98c`: build job completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+- `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+- `docker compose up -d`: recreated and started `pulsedeck-panel`.
+- `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+- `GET http://127.0.0.1:14770/api/v1/health`: passed with `name: PulseDeck` and `port: 14770`.
+- Post-deploy smoke passed against the Compose deployment:
+  - Login with `admin / change-me` succeeded.
+  - `/api/v1/protocols` returned all 7 target protocol types: VMess, VLESS, Trojan, Shadowsocks, Hysteria2, Tuic, and AnyTLS.
+  - Created a temporary node without region input and enrolled it with IPv4 plus IPv6 addresses; the panel classified it as `dual-stack`.
+  - Queued remote `protocol-add`, `reset-links`, and `protocol-delete` commands successfully.
+  - Verified alert policy API response shape.
+  - Verified Rust Agent runtime downloads from the deployed image: `linux-x64` 614864 bytes, `linux-arm64` 531160 bytes, and `linux-armv7l` 558476 bytes.
+  - Deleted the temporary smoke node after verification.
 - User requested a full Agent direction change:
   - Remove the Node.js Agent.
   - Use Rust for the Agent.
@@ -300,8 +330,8 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 
 ## Next Targets
 
-1. Import the real SoybeanAdmin template into PulseDeck and keep its project structure instead of the temporary single-file Vue shell.
-2. Rework SoybeanAdmin routes/pages into sing-box node management modules: dashboard, nodes, Agent install, sing-box configs, subscriptions, alerts, commands, and settings.
-3. Keep the existing PulseDeck API/Agent work only where it fits the new sing-box panel direction; replace mismatched frontend assumptions.
-4. Deepen Agent compatibility: Alpine/musl handling, Debian/Ubuntu/CentOS package hints, lower-memory Node runtime fallback guidance, LXC cgroup v1/v2 detection, and package checksum verification.
-5. Add subscription link generation from real Agent-reported sing-box inbounds after node lifecycle is stable.
+1. Implement the Rust Agent sing-box executor: install/update sing-box, render inbound configs, apply protocol add/delete, reset node links, restart/reload service, and stream command progress.
+2. Add WebSocket Agent control and telemetry: heartbeat, per-second traffic samples, command dispatch, command output events, reconnect handling, and counter wrap/reboot protection.
+3. Integrate GeoIP/Geosite data for real region detection and routing metadata, while keeping manual region override in the UI.
+4. Improve subscription distribution: generate real protocol links from Agent-reported inbounds, support auto-removal when traffic threshold policy disables a node, and expose per-profile filtering.
+5. Continue Soybean page cleanup for a lighter personal panel: denser dashboard, clearer node/protocol actions, faster per-view loading, and less unused template code.
