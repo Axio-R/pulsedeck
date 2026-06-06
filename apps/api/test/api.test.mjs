@@ -77,6 +77,30 @@ test('node enrollment install script is LXC and multi-arch aware', async () => {
   }
 });
 
+test('soybean auth contract returns wrapped login token and user info', async () => {
+  const app = await startServer();
+  try {
+    const login = await request(app.base, '/api/v1/auth/login', {
+      method: 'POST',
+      body: { userName: 'admin', password: 'change-me' }
+    });
+    assert.equal(login.res.status, 200);
+    assert.equal(login.body.code, '0000');
+    assert.ok(login.body.data.token);
+    assert.ok(login.body.data.refreshToken);
+
+    const info = await request(app.base, '/api/v1/auth/getUserInfo', {
+      headers: { authorization: `Bearer ${login.body.data.token}` }
+    });
+    assert.equal(info.res.status, 200);
+    assert.equal(info.body.code, '0000');
+    assert.equal(info.body.data.userName, 'admin');
+    assert.ok(info.body.data.roles.includes('R_SUPER'));
+  } finally {
+    await app.close();
+  }
+});
+
 test('subscription profiles protect defaults and delete custom profiles', async () => {
   const app = await startServer();
   try {

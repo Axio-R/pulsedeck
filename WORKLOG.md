@@ -5,8 +5,8 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 ## Current Task
 
 - Build a new project named `PulseDeck` in `/root/pulsedeck`.
-- Treat this as a fresh product redesign, not a cosmetic RelayDeck patch.
-- Frontend direction: SoybeanAdmin-inspired Vue 3 admin shell, Naive UI-style dense operations layout, clearer functional sections, and simpler cross-feature workflows.
+- Treat this as a fresh sing-box node management panel, not a cosmetic RelayDeck patch.
+- Corrected frontend direction: use the real upstream `soybeanjs/soybean-admin` template as the base project, then modify routes, pages, stores, request services, and layout content for sing-box node management. Do not merely imitate the style with a hand-written shell.
 - Agent direction: probe-style lightweight node runtime inspired by projects such as Komari, with host metrics, network addresses, service/process status, diagnostics, and clear local command UX.
 - Default panel port: `14770`, chosen to avoid conflicts with existing projects.
 - Agent compatibility is a first-class requirement: support common Linux distributions, systemd/OpenRC/non-systemd hosts, x86_64/aarch64/armv7 where possible, and low-resource LXC/container VPS environments.
@@ -57,6 +57,10 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 - [x] Initialize git repository and first commit.
 - [x] Create GitHub repository `Axio-R/pulsedeck`.
 - [x] Push, wait for GHCR image, deploy locally on port `14770`, and smoke test.
+- [x] Correct direction: import the real upstream SoybeanAdmin template as the frontend foundation.
+- [x] Replace the temporary hand-written Vue shell with SoybeanAdmin project structure.
+- [x] Finish local SoybeanAdmin-based sing-box panel verification.
+- [ ] Push, wait for GHCR, and redeploy.
 
 ## Log
 
@@ -99,11 +103,34 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - Created smoke node `smoke-lxc-node`.
   - Fetched `/api/v1/agents/install/{install_id}` and confirmed PK/pk shortcut creation, `PULSEDECK_AGENT_HOME`, `/var/lib/pulsedeck`, `/opt/pulsedeck`, `linux-x64`, `linux-arm64`, `linux-armv7l`, systemd, OpenRC, and `cron-manual` fallback markers.
   - `/api/v1/subscription-profiles` returns default protected Profiles with `deletable: false` for `default-raw`.
+- Direction correction from user:
+  - The frontend must directly use `https://github.com/soybeanjs/soybean-admin` as the template foundation.
+  - PulseDeck should be rebuilt as a sing-box node management panel on top of that template.
+  - The earlier custom lightweight Vue shell is considered the wrong foundation and should be replaced by the real SoybeanAdmin project structure.
+- Imported upstream SoybeanAdmin template files into PulseDeck:
+  - Added `src/`, `packages/`, `build/`, `public/`, `index.html`, Vite, UnoCSS, TypeScript, pnpm workspace, and template config files from `soybeanjs/soybean-admin`.
+  - Replaced the temporary `apps/web` frontend with SoybeanAdmin root frontend structure.
+  - Converted `package.json` to SoybeanAdmin pnpm workspace dependencies while preserving PulseDeck API/Agent scripts.
+  - Changed Dockerfile to use `corepack`/`pnpm install --frozen-lockfile` and `pnpm build` in GitHub Actions/Docker build, then serve root `dist` from the API runtime image.
+  - Set Soybean env values to PulseDeck title, `/api/v1` backend base URL, storage prefix, dashboard home route, and dev preview ports.
+  - Added Soybean routes/pages for Dashboard, Nodes, sing-box Config, Subscriptions, Alerts, Commands, and Settings.
+  - Added a PulseDeck frontend API service under Soybean `src/service/api`.
+  - Added Soybean-compatible auth responses in the PulseDeck API while keeping existing API behavior for tests.
+- Removed the temporary hand-written `apps/web` frontend files and the Soybean demo `home` view so the generated route set uses `dashboard` as the home route.
+- Fixed Soybean/pnpm strict dependency issues by adding explicit root dependencies used by the template build: `axios@1.16.0`, `@iconify/utils@3.1.3`, `@unocss/core@66.6.8`, and `@unocss/preset-mini@66.6.8`.
+- Verification after Soybean import:
+  - `corepack pnpm install --frozen-lockfile --ignore-scripts`: passed.
+  - `corepack pnpm build`: passed and generated `dist`.
+  - `corepack pnpm typecheck`: passed.
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 5 tests.
+  - Route scan found no old `home` route references in generated router/typing/locale files.
+  - Token/mock scan found no GitHub token or old Apifox token strings in tracked source areas.
 
 ## Next Targets
 
-1. Replace the first single-file Vue shell with a more complete SoybeanAdmin-style module structure: route modules, layout components, Pinia stores, request service, and reusable operation cards.
-2. Deepen Agent compatibility: Alpine/musl handling, Debian/Ubuntu/CentOS package hints, lower-memory Node runtime fallback guidance, LXC cgroup v1/v2 detection, and package checksum verification.
-3. Add real notification delivery for Telegram and SMTP instead of only storing channel config.
-4. Add Agent enrollment UI detail drawer, diagnostics timeline, and metric sparklines.
-5. Add subscription link generation from real Agent-reported proxy inbounds after probe lifecycle is stable.
+1. Import the real SoybeanAdmin template into PulseDeck and keep its project structure instead of the temporary single-file Vue shell.
+2. Rework SoybeanAdmin routes/pages into sing-box node management modules: dashboard, nodes, Agent install, sing-box configs, subscriptions, alerts, commands, and settings.
+3. Keep the existing PulseDeck API/Agent work only where it fits the new sing-box panel direction; replace mismatched frontend assumptions.
+4. Deepen Agent compatibility: Alpine/musl handling, Debian/Ubuntu/CentOS package hints, lower-memory Node runtime fallback guidance, LXC cgroup v1/v2 detection, and package checksum verification.
+5. Add subscription link generation from real Agent-reported sing-box inbounds after node lifecycle is stable.

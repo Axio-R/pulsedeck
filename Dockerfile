@@ -1,10 +1,12 @@
 FROM node:22-alpine AS build
 
 WORKDIR /app
-COPY package.json ./
-RUN npm install
+RUN corepack enable
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY packages ./packages
+RUN pnpm install --frozen-lockfile
 COPY . .
-RUN npm run build:web
+RUN pnpm build
 
 FROM node:22-alpine
 
@@ -17,7 +19,7 @@ ENV PULSEDECK_DATA_FILE=/data/pulsedeck.json
 COPY package.json ./
 COPY --from=build /app/apps/api ./apps/api
 COPY --from=build /app/apps/agent ./apps/agent
-COPY --from=build /app/apps/web/dist ./apps/web/dist
+COPY --from=build /app/dist ./dist
 
 VOLUME ["/data"]
 EXPOSE 14770

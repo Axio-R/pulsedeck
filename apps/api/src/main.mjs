@@ -8,7 +8,7 @@ import { createNode, JsonStore, nowIso, randomToken } from './store.mjs';
 import { renderAgentInstallScript } from './install-script.mjs';
 
 const ROOT_DIR = fileURLToPath(new URL('../../..', import.meta.url));
-const WEB_DIST_DIR = path.join(ROOT_DIR, 'apps', 'web', 'dist');
+const WEB_DIST_DIR = path.join(ROOT_DIR, 'dist');
 const WEB_INDEX_FILE = path.join(WEB_DIST_DIR, 'index.html');
 const AGENT_RUNTIME_FILE = path.join(ROOT_DIR, 'apps', 'agent', 'src', 'main.mjs');
 const PORT = Number(process.env.PULSEDECK_PORT || 14770);
@@ -29,6 +29,14 @@ const TEXT_HEADERS = {
 function sendJson(res, status, body) {
   res.writeHead(status, JSON_HEADERS);
   res.end(`${JSON.stringify(body, null, 2)}\n`);
+}
+
+function sendSoy(res, data, msg = 'ok') {
+  sendJson(res, 200, {
+    code: '0000',
+    msg,
+    data
+  });
 }
 
 function sendText(res, status, body, headers = TEXT_HEADERS) {
@@ -251,16 +259,48 @@ async function handleApi(req, res, store, url) {
 
   if (method === 'POST' && url.pathname === '/api/v1/auth/login') {
     const body = await readJson(req);
-    if (body.username !== ADMIN_USER || body.password !== ADMIN_PASSWORD) {
+    const username = body.username ?? body.userName;
+    if (username !== ADMIN_USER || body.password !== ADMIN_PASSWORD) {
       return forbidden(res, 'invalid username or password');
     }
     const token = randomToken(32);
+    const refreshToken = randomToken(32);
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     await store.update((draft) => {
       draft.sessions = draft.sessions.filter((session) => Date.parse(session.expiresAt) > Date.now());
-      draft.sessions.push({ token, user: ADMIN_USER, createdAt: nowIso(), expiresAt });
+      draft.sessions.push({ token, refreshToken, user: ADMIN_USER, createdAt: nowIso(), expiresAt });
     });
+    if (body.userName !== undefined) {
+      return sendSoy(res, { token, refreshToken });
+    }
     return sendJson(res, 200, { token, expiresAt, user: { username: ADMIN_USER } });
+  }
+
+  if (method === 'GET' && url.pathname === '/api/v1/auth/getUserInfo') {
+    const session = requireUser(req, data);
+    if (!session) return sendJson(res, 200, { code: '8888', msg: 'authentication required', data: null });
+    return sendSoy(res, {
+      userId: 'admin',
+      userName: session.user || ADMIN_USER,
+      roles: ['R_SUPER'],
+      buttons: ['*']
+    });
+  }
+
+  if (method === 'POST' && url.pathname === '/api/v1/auth/refreshToken') {
+    const body = await readJson(req);
+    const session = data.sessions.find((item) => item.refreshToken === body.refreshToken);
+    if (!session) return sendJson(res, 200, { code: '8888', msg: 'invalid refresh token', data: null });
+    const token = randomToken(32);
+    const refreshToken = randomToken(32);
+    await store.update((draft) => {
+      const draftSession = draft.sessions.find((item) => item.refreshToken === body.refreshToken);
+      if (!draftSession) return;
+      draftSession.token = token;
+      draftSession.refreshToken = refreshToken;
+      draftSession.expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    });
+    return sendSoy(res, { token, refreshToken });
   }
 
   if (method === 'GET' && segments.join('/') === 'api/v1/agents/runtime') {
@@ -535,8 +575,16 @@ async function handleApi(req, res, store, url) {
     const body = await readJson(req);
     let channels;
     await store.update((draft) => {
-      if (body.telegram) draft.notificationChannels.telegram = { ...draft.notificationChannels.telegram, ...body.telegram };
-      if (body.email) draft.notificationChannels.email = { ...draft.notificationChannels.email, ...body.email };
+      if (body.telegram) {
+        const nextTelegram = { ...body.telegram };
+        if (nextTelegram.botToken === 'configured') delete nextTelegram.botToken;
+        draft.notificationChannels.telegram = { ...draft.notificationChannels.telegram, ...nextTelegram };
+      }
+      if (body.email) {
+        const nextEmail = { ...body.email };
+        if (nextEmail.password === 'configured') delete nextEmail.password;
+        draft.notificationChannels.email = { ...draft.notificationChannels.email, ...nextEmail };
+      }
       channels = draft.notificationChannels;
     });
     return sendJson(res, 200, {

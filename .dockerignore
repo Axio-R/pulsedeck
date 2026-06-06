@@ -3,6 +3,7 @@ node_modules
 .data
 coverage
 *.log
-.env
+.env.local
+.env.*.local
 WORKLOG.md
 docs

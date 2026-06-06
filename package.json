@@ -1,27 +1,104 @@
 {
   "name": "pulsedeck",
   "version": "0.1.0",
-  "private": false,
+  "description": "A sing-box node management panel based on soybean-admin.",
+  "keywords": [
+    "sing-box",
+    "node-management",
+    "soybean-admin",
+    "Vue3",
+    "NaiveUI",
+    "UnoCSS"
+  ],
+  "homepage": "https://github.com/Axio-R/pulsedeck",
+  "bugs": {
+    "url": "https://github.com/Axio-R/pulsedeck/issues"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "PulseDeck"
+  },
+  "repository": {
+    "url": "https://github.com/Axio-R/pulsedeck.git"
+  },
   "type": "module",
-  "description": "Probe-style node operations panel with subscription distribution.",
+  "packageManager": "pnpm@10.5.0",
   "scripts": {
     "start": "node apps/api/src/main.mjs",
-    "dev": "PULSEDECK_ENV=development node --watch apps/api/src/main.mjs",
+    "api:dev": "PULSEDECK_ENV=development node --watch apps/api/src/main.mjs",
     "agent": "node apps/agent/src/main.mjs",
     "test": "node --test",
-    "check": "node --check apps/api/src/main.mjs && node --check apps/api/src/store.mjs && node --check apps/api/src/install-script.mjs && node --check apps/agent/src/main.mjs",
-    "build:web": "vite build --config apps/web/vite.config.js"
-  },
-  "engines": {
-    "node": ">=20"
+    "check:api": "node --check apps/api/src/main.mjs && node --check apps/api/src/store.mjs && node --check apps/api/src/install-script.mjs && node --check apps/agent/src/main.mjs",
+    "build": "vite build --mode prod",
+    "build:test": "vite build --mode test",
+    "dev": "vite --mode test --host 0.0.0.0",
+    "dev:prod": "vite --mode prod --host 0.0.0.0",
+    "cleanup": "sa cleanup",
+    "fmt": "oxfmt",
+    "gen-route": "sa gen-route",
+    "lint": "oxlint --fix && eslint --fix .",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit --skipLibCheck",
+    "update-pkg": "sa update-pkg"
   },
   "dependencies": {
-    "@vitejs/plugin-vue": "^5.2.1",
-    "vite": "^6.0.7",
-    "vue": "^3.5.13",
-    "naive-ui": "^2.41.0",
-    "pinia": "^2.3.0",
-    "vue-router": "^4.5.0",
-    "@vicons/ionicons5": "^0.13.0"
+    "@better-scroll/core": "2.5.1",
+    "@iconify/vue": "5.0.1",
+    "@sa/axios": "workspace:*",
+    "@sa/color": "workspace:*",
+    "@sa/hooks": "workspace:*",
+    "@sa/materials": "workspace:*",
+    "@sa/utils": "workspace:*",
+    "@vueuse/core": "14.3.0",
+    "axios": "1.16.0",
+    "clipboard": "2.0.11",
+    "dayjs": "1.11.20",
+    "defu": "6.1.7",
+    "echarts": "6.0.0",
+    "json5": "2.2.3",
+    "naive-ui": "2.44.1",
+    "nprogress": "0.2.0",
+    "pinia": "3.0.4",
+    "tailwind-merge": "3.6.0",
+    "vue": "3.5.34",
+    "vue-draggable-plus": "0.6.1",
+    "vue-i18n": "11.4.2",
+    "vue-router": "5.0.7"
+  },
+  "devDependencies": {
+    "@elegant-router/vue": "0.3.8",
+    "@iconify/json": "2.2.472",
+    "@iconify/utils": "3.1.3",
+    "@sa/scripts": "workspace:*",
+    "@sa/uno-preset": "workspace:*",
+    "@soybeanjs/eslint-config-vue": "^0.0.2",
+    "@types/node": "25.7.0",
+    "@types/nprogress": "0.2.3",
+    "@unocss/core": "66.6.8",
+    "@unocss/preset-mini": "66.6.8",
+    "@vitejs/plugin-vue": "6.0.6",
+    "@vitejs/plugin-vue-jsx": "5.1.5",
+    "consola": "3.4.2",
+    "eslint": "10.3.0",
+    "kolorist": "1.8.0",
+    "oxfmt": "^0.49.0",
+    "oxlint": "^1.64.0",
+    "sass": "1.99.0",
+    "simple-git-hooks": "2.13.1",
+    "tsx": "4.21.0",
+    "typescript": "6.0.3",
+    "unocss": "^66.6.8",
+    "unplugin-icons": "23.0.1",
+    "unplugin-vue-components": "32.0.0",
+    "vite": "8.0.12",
+    "vite-plugin-progress": "0.0.7",
+    "vite-plugin-svg-icons": "2.0.1",
+    "vite-plugin-vue-devtools": "8.1.2",
+    "vite-plugin-vue-transition-root-validator": "^0.1.0",
+    "vue-tsc": "3.2.8"
+  },
+  "engines": {
+    "node": ">=20.19.0",
+    "pnpm": ">=10.5.0"
   }
 }

@@ -1,10 +1,10 @@
 # PulseDeck
 
-PulseDeck is a fresh rebuild of the node operations panel concept:
+PulseDeck is a sing-box node management panel built directly on top of the upstream SoybeanAdmin template:
 
-- SoybeanAdmin-inspired Vue 3 + Naive UI panel shell.
+- Real `soybeanjs/soybean-admin` project structure: Vue 3, TypeScript, Naive UI, UnoCSS, Pinia, vue-router, pnpm workspace packages, and Soybean layout/router conventions.
 - Probe-style Agent for Linux VPS and LXC environments.
-- Node enrollment, metrics, diagnostics, command queue, subscriptions, and alert channels.
+- sing-box node enrollment, Agent install, metrics, diagnostics, command queue, subscriptions, and alert channels.
 - Default panel port: `14770`.
 
 ## Deployment Rule
@@ -20,9 +20,9 @@ docker compose up -d
 
 ```bash
 npm test
-npm run check
-npm run build:web
+pnpm check:api
+pnpm build
 npm start
 ```
 
-The first version keeps the backend dependency-free and uses Vue/Naive UI for the panel build.
+The API and Agent remain dependency-light Node.js modules. The frontend follows SoybeanAdmin and should be developed with pnpm.

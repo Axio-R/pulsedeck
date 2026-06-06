@@ -4,6 +4,6 @@ dist/
 coverage/
 .data/
 *.log
-.env
-.env.*
+.env.local
+.env.*.local
 !.env.example
