@@ -150,6 +150,15 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `GET http://127.0.0.1:14770/api/v1/health`: passed after deployment.
   - Deployment asset check found the old `6-18` password text absent and the new `6-64` password text present in built assets.
   - Post-deploy login smoke with `admin / change-me` passed through the Soybean-compatible auth contract and returned `R_SUPER`.
+- Recorded the login validation deployment details in worklog-only commit `858cb90 Record login validation deployment` and pushed it to `origin/main`.
+- GitHub Actions run `27066718831` for commit `858cb90`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+- `docker compose pull`: pulled the GHCR image for the latest `main` state after the workflow completed.
+- `docker compose up -d`: recreated and started `pulsedeck-panel`; no local Docker image build was run.
+- `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+- `GET http://127.0.0.1:14770/api/v1/health`: passed with `name: PulseDeck` and `port: 14770`.
+- Post-deploy login smoke with `admin / change-me` passed after the latest GHCR deployment:
+  - Soybean-compatible login returned token and refresh token.
+  - `/api/v1/auth/getUserInfo` returned `user: admin` and `roles: ["R_SUPER"]`.
 
 ## Next Targets
 
