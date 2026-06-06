@@ -42,7 +42,7 @@ test('health reports PulseDeck on default product port', async () => {
   }
 });
 
-test('node enrollment install script is LXC and multi-arch aware', async () => {
+test('node enrollment install script is LXC and Rust multi-arch aware', async () => {
   const app = await startServer();
   try {
     const login = await request(app.base, '/api/v1/auth/login', {
@@ -63,15 +63,21 @@ test('node enrollment install script is LXC and multi-arch aware', async () => {
     const script = await request(app.base, `/api/v1/agents/install/${created.body.installId}`);
     assert.equal(script.res.status, 200);
     assert.match(script.body, /PULSEDECK_AGENT_HOME/);
+    assert.match(script.body, /PULSEDECK_AGENT_TARGET/);
     assert.match(script.body, /\/var\/lib\/pulsedeck/);
     assert.match(script.body, /\/opt\/pulsedeck/);
     assert.match(script.body, /linux-x64/);
     assert.match(script.body, /linux-arm64/);
     assert.match(script.body, /linux-armv7l/);
+    assert.match(script.body, /pulsedeck-agent/);
+    assert.match(script.body, /runtime\/\$PULSEDECK_AGENT_TARGET/);
     assert.match(script.body, /systemd/);
     assert.match(script.body, /openrc/);
     assert.match(script.body, /PK/);
     assert.match(script.body, /pk status/);
+    assert.match(script.body, /RK/);
+    assert.doesNotMatch(script.body, /Node\.js runtime/);
+    assert.doesNotMatch(script.body, /node-v/);
   } finally {
     await app.close();
   }

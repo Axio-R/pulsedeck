@@ -22,9 +22,9 @@ It is not designed as a heavy multi-tenant airport platform, billing system, or 
 
 ## Current Gaps
 
-- Node creation exists, but node deletion was missing and is now being added.
+- Node create/list/delete exists, including cleanup of related Agent and command records.
 - Subscription Profile deletion exists for custom Profiles, but subscription link lifecycle needs stronger UX around reset/regenerate.
-- Agent command queue is HTTP polling today; real-time bidirectional control is not implemented yet.
+- Rust Agent command queue is HTTP polling today; real-time bidirectional WebSocket control is not implemented yet.
 - Traffic metrics are periodic snapshots today; real-time per-second rate streaming needs a dedicated protocol.
 - Local runtime data is ignored by `.gitignore`, but broader runtime JSON and database patterns should also be ignored.
 
@@ -54,8 +54,8 @@ It is not designed as a heavy multi-tenant airport platform, billing system, or 
 
 - One-line install command.
 - Adaptive install/temp directory selection.
-- Node runtime fallback while the project is still Node-based.
-- Future native Agent binary release from GitHub Actions for strict low-allocation telemetry.
+- Rust native Agent binary download from the panel runtime endpoint.
+- Future multi-arch Rust Agent artifacts from GitHub Actions for strict low-allocation telemetry.
 - Local shortcut command remains mandatory for recovery when the panel is unreachable.
 
 ### sing-box Management
@@ -122,18 +122,17 @@ The Agent should be split into three layers:
 
 ### Zero-Allocation Traffic Collection
 
-Strict zero heap allocation per sample cannot be guaranteed in a JavaScript/Node.js hot loop because the runtime and parser may allocate internally. To satisfy a real zero-allocation requirement, PulseDeck should move the hot traffic sampling loop to a native collector in a later stage.
+The Agent direction is Rust-only. The Node.js Agent has been removed from the design. Strict zero heap allocation per sample is now a Rust implementation target rather than a JavaScript workaround.
 
 Recommended path:
 
-- Phase 1: Node Agent low-allocation sampler.
-  - Reuse buffers and parsed structures where practical.
-  - Keep file paths and interface lists cached.
-  - Avoid JSON stringify in the per-second sampling path until send time.
-  - Good enough for early product validation.
+- Phase 1: Rust control Agent.
+  - Native binary install with no Node.js runtime dependency.
+  - Enrollment, heartbeat, metrics, diagnostics, command polling, local `PK/pk/RK/rk` commands.
+  - Uses a simple HTTP transport while WebSocket and the strict collector are being built.
 
-- Phase 2: Native collector.
-  - Static Go or Rust binary built by GitHub Actions for `linux/amd64`, `linux/arm64`, and best-effort `linux/arm/v7`.
+- Phase 2: Rust zero-allocation traffic collector.
+  - Static Rust binary built by GitHub Actions for `linux/amd64`, `linux/arm64`, and best-effort `linux/arm/v7`.
   - Persistent file descriptors for `/proc/net/dev` or sysfs interface counters.
   - Fixed-size stack or preallocated buffers.
   - No heap allocation in the steady-state sample loop.
@@ -284,6 +283,7 @@ Future SQLite tables:
 - Auth.
 - Node create/list/delete.
 - Agent install/enroll/heartbeat.
+- Rust Agent binary scaffold and installer runtime delivery.
 - Subscription Profile lifecycle.
 - Telegram/email channel settings.
 - GHCR build and Compose deployment.
@@ -317,8 +317,8 @@ Future SQLite tables:
 
 - Go/Rust native collector for strict zero-allocation sampling.
 - Multi-arch GHCR/GitHub release artifacts.
-- Node or shell supervisor invokes the collector.
-- Capability detection and fallback to Node sampler.
+- Rust control runtime invokes or embeds the zero-allocation collector.
+- Capability detection and fallback to a lower-frequency Rust sampler when restricted container files prevent strict collection.
 
 ### Stage 5: Advanced Subscription And Policy
 
@@ -366,7 +366,7 @@ Never tracked:
 
 ## Immediate Implementation Targets
 
-1. Add node deletion API, frontend action, and tests.
+1. Finish Rust Agent multi-arch artifact publishing beyond the initial `linux-x64` Docker-packaged binary.
 2. Add reset subscription/install identity API.
 3. Add Agent WebSocket protocol skeleton.
 4. Add command event persistence and SSE output.

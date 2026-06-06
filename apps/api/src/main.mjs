@@ -10,7 +10,7 @@ import { renderAgentInstallScript } from './install-script.mjs';
 const ROOT_DIR = fileURLToPath(new URL('../../..', import.meta.url));
 const WEB_DIST_DIR = path.join(ROOT_DIR, 'dist');
 const WEB_INDEX_FILE = path.join(WEB_DIST_DIR, 'index.html');
-const AGENT_RUNTIME_FILE = path.join(ROOT_DIR, 'apps', 'agent', 'src', 'main.mjs');
+const AGENT_RUNTIME_DIR = path.join(ROOT_DIR, 'agent-dist');
 const PORT = Number(process.env.PULSEDECK_PORT || 14770);
 const HOST = process.env.PULSEDECK_HOST || '0.0.0.0';
 const ADMIN_USER = process.env.PULSEDECK_ADMIN_USER || 'admin';
@@ -303,12 +303,21 @@ async function handleApi(req, res, store, url) {
     return sendSoy(res, { token, refreshToken });
   }
 
-  if (method === 'GET' && segments.join('/') === 'api/v1/agents/runtime') {
-    const runtime = await readFile(AGENT_RUNTIME_FILE, 'utf8');
-    return sendText(res, 200, runtime, {
-      'content-type': 'application/javascript; charset=utf-8',
+  if (method === 'GET' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'agents' && segments[3] === 'runtime' && segments[4]) {
+    const target = decodeURIComponent(segments[4]);
+    if (!/^[a-z0-9_-]+$/i.test(target)) return badRequest(res, 'invalid agent target');
+    const runtimeFile = path.join(AGENT_RUNTIME_DIR, target, 'pulsedeck-agent');
+    try {
+      await stat(runtimeFile);
+    } catch {
+      return notFound(res);
+    }
+    res.writeHead(200, {
+      'content-type': 'application/octet-stream',
       'cache-control': 'no-store'
     });
+    createReadStream(runtimeFile).pipe(res);
+    return;
   }
 
   if (method === 'GET' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'agents' && segments[3] === 'install' && segments[4]) {

@@ -11,10 +11,12 @@ PulseDeck Agent targets practical VPS environments first:
 
 - Do not assume `/opt` or `/tmp` is writable.
 - Test candidate install directories before selecting one.
-- Prefer system Node.js 20+ when available.
-- Bootstrap a private Node.js runtime when the system runtime is missing or too old.
-- Create both `PK` and `pk` command shortcuts.
+- Download the Rust Agent binary for the detected target from the panel runtime endpoint.
+- Do not require Node.js on the node machine.
+- Create `PK`, `pk`, `RK`, and `rk` command shortcuts for compatibility with the earlier command naming.
 - Install service through systemd, OpenRC, cron `@reboot`, or manual fallback.
+
+The GHCR image builds and packages Rust Agent binaries for `linux-x64`, `linux-arm64`, and `linux-armv7l` so a panel running on one architecture can install nodes on another supported architecture.
 
 ## Runtime Strategy
 
@@ -22,14 +24,14 @@ PulseDeck Agent targets practical VPS environments first:
 - Diagnostics report missing capabilities instead of failing the Agent loop.
 - Local commands must work even if the panel is unreachable.
 
-## Traffic Collector Direction
+## Rust Traffic Collector Direction
 
-The current Node-based Agent is suitable for early low-allocation telemetry and command control, but it cannot strictly guarantee zero heap allocation in a per-second sampling loop.
+The Agent direction is Rust-only. The Node.js Agent has been removed.
 
 For precise real-time traffic monitoring, the planned Agent architecture separates the hot collector from the control runtime:
 
 - Keep the control runtime responsible for enrollment, WebSocket reconnect, commands, and sing-box operations.
-- Add a future native Go/Rust collector built by GitHub Actions for multi-arch Linux targets.
+- Add a Rust collector built by GitHub Actions for multi-arch Linux targets.
 - Use persistent counter file descriptors and fixed/preallocated buffers in the native collector.
 - Handle counter wrap, interface reset, machine reboot, and restricted LXC files without adding negative traffic deltas.
 

@@ -35,7 +35,8 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - Lightweight loading pattern: fetch only data needed for the current view.
 - Agent:
   - Portable POSIX shell installer.
-  - Private Node.js runtime bootstrap where host Node.js is missing or too old.
+  - Rust native Agent binary; node machines must not need Node.js.
+  - GHCR-built Agent binaries for `linux-x64`, `linux-arm64`, and best-effort `linux-armv7l`.
   - Adaptive writable install/temp directory selection for low-space or restricted LXC hosts.
   - Local command shortcut `PK` plus lowercase `pk` for status, menu, logs, doctor, restart, update, config, and once.
   - Metrics collection should degrade gracefully when `/proc`, cgroup, or network interface data is restricted.
@@ -66,6 +67,31 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 
 ### 2026-06-07
 
+- User requested a full Agent direction change:
+  - Remove the Node.js Agent.
+  - Use Rust for the Agent.
+  - Redesign the Agent architecture around native low-overhead collection and control.
+- Implementation direction for this turn:
+  - Replace the old JavaScript Agent bootstrap installer with Rust binary download and install.
+  - Add a Rust Agent project and local command UX using a native binary.
+  - Change panel runtime delivery from JavaScript runtime download to Rust binary download by target.
+  - Update scripts, tests, docs, and WORKLOG so the old JavaScript Agent is no longer part of the Agent plan.
+  - Keep panel API/frontend in Node/Vue for now; the requested change is specifically Agent runtime architecture.
+- Rust Agent replacement implemented in the working tree:
+  - Deleted the previous JavaScript Agent runtime.
+  - Added `apps/agent` as a Rust project with native local commands: `status`, `menu`, `once`, `logs`, `doctor`, `restart`, `update`, `config`, and `version`.
+  - Rewrote the installer to detect `linux-x64`, `linux-arm64`, or `linux-armv7l`, download the Rust binary, create `PK`/`pk`/`RK`/`rk` shortcuts, and install systemd/OpenRC/cron/manual service startup.
+  - Changed the API runtime endpoint to serve `agent-dist/{target}/pulsedeck-agent` binaries.
+  - Updated the Dockerfile so GitHub Actions builds and packages Rust Agent binaries for x64, arm64, and armv7l without any local Docker build.
+  - Added QEMU setup in the GHCR workflow for the cross-architecture Agent build stages.
+  - Updated tests, README, settings UI, and Agent/architecture docs for the Rust-only Agent direction.
+  - Local machine has no `cargo`; Rust compilation will be validated by GitHub Actions/GHCR.
+- Local verification after Rust Agent replacement:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 6 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - No local Docker image build was performed.
 - User clarified PulseDeck positioning: lightweight personal node and subscription management panel, not a heavy multi-tenant operations platform.
 - New planning requirements captured:
   - Create a complete project function design and staged roadmap.
@@ -122,10 +148,10 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 - Implemented first API skeleton:
   - Auth login, health, dashboard summary, node creation/listing, node command queue, Agent install/runtime endpoints, Agent enroll/heartbeat/metrics/diagnostics/command-result endpoints, subscription Profile lifecycle, public subscription output, and Telegram/email notification channel config.
   - JSON persistence with default protected subscription Profiles.
-- Implemented Agent skeleton:
+- Implemented first Agent skeleton, superseded by the Rust Agent redesign on 2026-06-07:
   - Probe-style metrics collection from `/proc`, `os`, and network interfaces with graceful degradation.
   - Local `PK`/`pk` command UX for status, menu, once, logs, doctor, restart, update, config, and version.
-  - Installer script renderer with adaptive install/temp directory selection, private Node.js runtime bootstrap, x64/arm64/armv7l platform mapping, systemd/OpenRC/cron/manual service fallback, and LXC-friendly assumptions.
+  - Installer script renderer with adaptive install/temp directory selection, x64/arm64/armv7l platform mapping, systemd/OpenRC/cron/manual service fallback, and LXC-friendly assumptions.
 - Implemented first SoybeanAdmin-style Vue/Naive UI shell:
   - Sidebar/topbar admin layout, dashboard, nodes, subscriptions, alert channels, command queue, and settings views.
   - Current-view-only data loading pattern.

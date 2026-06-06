@@ -26,9 +26,9 @@
   "scripts": {
     "start": "node apps/api/src/main.mjs",
     "api:dev": "PULSEDECK_ENV=development node --watch apps/api/src/main.mjs",
-    "agent": "node apps/agent/src/main.mjs",
+    "agent": "cargo run --manifest-path apps/agent/Cargo.toml --",
     "test": "node --test",
-    "check:api": "node --check apps/api/src/main.mjs && node --check apps/api/src/store.mjs && node --check apps/api/src/install-script.mjs && node --check apps/agent/src/main.mjs",
+    "check:api": "node --check apps/api/src/main.mjs && node --check apps/api/src/store.mjs && node --check apps/api/src/install-script.mjs",
     "build": "vite build --mode prod",
     "build:test": "vite build --mode test",
     "dev": "vite --mode test --host 0.0.0.0",
