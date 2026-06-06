@@ -60,7 +60,7 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 - [x] Correct direction: import the real upstream SoybeanAdmin template as the frontend foundation.
 - [x] Replace the temporary hand-written Vue shell with SoybeanAdmin project structure.
 - [x] Finish local SoybeanAdmin-based sing-box panel verification.
-- [ ] Push, wait for GHCR, and redeploy.
+- [x] Push, wait for GHCR, and redeploy.
 
 ## Log
 
@@ -126,6 +126,19 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `npm test`: passed, 5 tests.
   - Route scan found no old `home` route references in generated router/typing/locale files.
   - Token/mock scan found no GitHub token or old Apifox token strings in tracked source areas.
+- Committed and pushed `7a0a141 Rebase panel on SoybeanAdmin template` to `origin/main`.
+- GitHub Actions run `27066095204` for commit `7a0a141`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+- `docker compose pull`: pulled the GHCR image after the workflow completed.
+- `docker compose up -d`: recreated and started `pulsedeck-panel`; no local Docker image build was run.
+- `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+- `GET http://127.0.0.1:14770/api/v1/health`: passed with `name: PulseDeck` and `port: 14770`.
+- `GET http://127.0.0.1:14770/`: returned the SoybeanAdmin-built HTML with `<title>PulseDeck</title>` and built assets under `/assets/`.
+- Post-deploy smoke passed against the Compose deployment:
+  - Soybean-compatible login returned `code: "0000"`, `token`, and `refreshToken`.
+  - `/api/v1/auth/getUserInfo` returned `R_SUPER` for the default admin session.
+  - Created smoke node `soybean-singbox-smoke`.
+  - Fetched the Agent install script and confirmed `PK/pk`, `PULSEDECK_AGENT_HOME`, `/var/lib/pulsedeck`, and x64/arm64/armv7l runtime markers.
+  - Subscription Profiles still protect `default-raw` with `deletable: false`.
 
 ## Next Targets
 
