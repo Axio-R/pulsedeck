@@ -54,9 +54,9 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 - [x] Implement probe-style Agent skeleton and installer.
 - [x] Add tests and syntax checks.
 - [x] Add Dockerfile, Compose, and GHCR workflow.
-- [ ] Initialize git repository and first commit.
-- [ ] Create GitHub repository `Axio-R/pulsedeck`.
-- [ ] Push, wait for GHCR image, deploy locally on port `14770`, and smoke test.
+- [x] Initialize git repository and first commit.
+- [x] Create GitHub repository `Axio-R/pulsedeck`.
+- [x] Push, wait for GHCR image, deploy locally on port `14770`, and smoke test.
 
 ## Log
 
@@ -86,4 +86,24 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `npm run check`: passed for API, store, install-script renderer, and Agent runtime syntax.
   - `npm test`: passed, 4 tests.
   - Attempted local `npm install` only to validate frontend build, but registry/network response produced no output for an extended period. The process was stopped, no `node_modules` or `package-lock.json` remained, and no Docker image was built locally. Frontend dependency install/build will be validated by GitHub Actions when the repository is pushed.
-- Created the first local commit for `Initial PulseDeck rebuild`; final pushed commit SHA will be recorded after the GitHub repository is created and pushed.
+- Created the first local commit for `Initial PulseDeck rebuild`; after final amend it was pushed as `f5f641bd1e0d59ac055b1649802a2f5c8002ff01`.
+- Created/confirmed GitHub repository `Axio-R/pulsedeck`: `https://github.com/Axio-R/pulsedeck`, public.
+- Pushed initial commit `f5f641bd1e0d59ac055b1649802a2f5c8002ff01` to `origin/main`.
+- GitHub Actions run `27065040964` for commit `f5f641b`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`. This also validated dependency install and the Vue/Vite frontend build in CI.
+- `docker compose pull`: pulled `ghcr.io/axio-r/pulsedeck:latest` after the GHCR workflow completed.
+- `docker compose up -d`: created and started `pulsedeck-panel`; no local Docker image build was run.
+- `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+- `GET http://127.0.0.1:14770/api/v1/health`: passed with `name: PulseDeck` and `port: 14770`.
+- Post-deploy smoke passed against the Compose deployment:
+  - Login with default credentials succeeded.
+  - Created smoke node `smoke-lxc-node`.
+  - Fetched `/api/v1/agents/install/{install_id}` and confirmed PK/pk shortcut creation, `PULSEDECK_AGENT_HOME`, `/var/lib/pulsedeck`, `/opt/pulsedeck`, `linux-x64`, `linux-arm64`, `linux-armv7l`, systemd, OpenRC, and `cron-manual` fallback markers.
+  - `/api/v1/subscription-profiles` returns default protected Profiles with `deletable: false` for `default-raw`.
+
+## Next Targets
+
+1. Replace the first single-file Vue shell with a more complete SoybeanAdmin-style module structure: route modules, layout components, Pinia stores, request service, and reusable operation cards.
+2. Deepen Agent compatibility: Alpine/musl handling, Debian/Ubuntu/CentOS package hints, lower-memory Node runtime fallback guidance, LXC cgroup v1/v2 detection, and package checksum verification.
+3. Add real notification delivery for Telegram and SMTP instead of only storing channel config.
+4. Add Agent enrollment UI detail drawer, diagnostics timeline, and metric sparklines.
+5. Add subscription link generation from real Agent-reported proxy inbounds after probe lifecycle is stable.
