@@ -51,40 +51,72 @@ const bgColor = computed(() => {
 </script>
 
 <template>
-  <div class="relative size-full flex-center overflow-hidden" :style="{ backgroundColor: bgColor }">
+  <div class="pulse-login-page" :style="{ backgroundColor: bgColor }">
     <WaveBg :theme-color="bgThemeColor" />
-    <NCard :bordered="false" class="relative z-4 w-auto rd-12px">
-      <div class="w-400px lt-sm:w-300px">
-        <header class="flex-y-center justify-between">
-          <SystemLogo class="size-64px lt-sm:size-48px" />
-          <h3 class="text-28px text-primary font-500 lt-sm:text-22px">{{ $t('system.title') }}</h3>
-          <div class="i-flex-col">
-            <ThemeSchemaSwitch
-              :theme-schema="themeStore.themeScheme"
-              :show-tooltip="false"
-              class="text-20px lt-sm:text-18px"
-              @switch="themeStore.toggleThemeScheme"
-            />
-            <LangSwitch
-              v-if="themeStore.header.multilingual.visible"
-              :lang="appStore.locale"
-              :lang-options="appStore.localeOptions"
-              :show-tooltip="false"
-              @change-lang="appStore.changeLocale"
-            />
-          </div>
-        </header>
-        <main class="pt-24px">
-          <h3 class="text-18px text-primary font-medium">{{ $t(activeModule.label) }}</h3>
-          <div class="pt-24px">
-            <Transition :name="themeStore.page.animateMode" mode="out-in" appear>
-              <component :is="activeModule.component" />
-            </Transition>
-          </div>
-        </main>
-      </div>
-    </NCard>
+    <section class="pulse-login-panel">
+      <header class="flex-y-center justify-between gap-16px">
+        <SystemLogo class="size-56px shrink-0 lt-sm:size-48px" />
+        <h1 class="min-w-0 flex-1 text-26px text-primary font-600 lt-sm:text-22px">{{ $t('system.title') }}</h1>
+        <div class="i-flex-col shrink-0">
+          <ThemeSchemaSwitch
+            :theme-schema="themeStore.themeScheme"
+            :show-tooltip="false"
+            class="text-20px lt-sm:text-18px"
+            @switch="themeStore.toggleThemeScheme"
+          />
+          <LangSwitch
+            v-if="themeStore.header.multilingual.visible"
+            :lang="appStore.locale"
+            :lang-options="appStore.localeOptions"
+            :show-tooltip="false"
+            @change-lang="appStore.changeLocale"
+          />
+        </div>
+      </header>
+      <main class="pt-24px">
+        <h2 class="text-18px text-primary font-medium">{{ $t(activeModule.label) }}</h2>
+        <div class="pt-20px">
+          <PwdLogin v-if="!props.module || props.module === 'pwd-login'" />
+          <component :is="activeModule.component" v-else />
+        </div>
+      </main>
+    </section>
   </div>
 </template>
 
-<style scoped></style>
+<style scoped>
+.pulse-login-page {
+  position: relative;
+  min-height: 100vh;
+  min-height: 100dvh;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 32px 16px;
+}
+
+.pulse-login-panel {
+  position: relative;
+  z-index: 4;
+  width: min(420px, 100%);
+  border: 1px solid rgb(226 232 240 / 86%);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 94%);
+  box-shadow: 0 18px 48px rgb(15 23 42 / 14%);
+  padding: 28px;
+}
+
+@media (max-width: 480px) {
+  .pulse-login-page {
+    align-items: flex-start;
+    padding: 24px 14px;
+  }
+
+  .pulse-login-panel {
+    padding: 22px;
+  }
+}
+</style>

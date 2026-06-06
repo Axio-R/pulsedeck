@@ -159,6 +159,18 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 - Post-deploy login smoke with `admin / change-me` passed after the latest GHCR deployment:
   - Soybean-compatible login returned token and refresh token.
   - `/api/v1/auth/getUserInfo` returned `user: admin` and `roles: ["R_SUPER"]`.
+- New login page rendering bug reported:
+  - Browser login page shows only `PulseDeck` and `密码登录`.
+  - Username/password inputs are not visible or not interactable.
+  - Initial source check confirms `pwd-login.vue` still contains the username/password form, so the likely fault is runtime rendering, CSS/layout clipping, component resolution, or a client-side exception in the Soybean login module.
+  - Next action: reproduce against the deployed `14770` panel, inspect generated assets/runtime errors, simplify the login module if needed, then commit, push, wait for GHCR, and redeploy from GHCR only.
+- Login page rendering fix implemented locally:
+  - Replaced the Soybean default login card/transition wrapper with a PulseDeck-specific stable login panel that can scroll on small screens.
+  - Replaced the critical password login form with native username/password inputs and a native submit button to avoid blank login caused by dynamic form component/layout issues.
+  - Kept the default credentials visible as `admin / change-me`.
+  - Removed scoped dark-mode overrides that were being minified into unintended global `html.dark` CSS.
+  - Verification passed: `corepack pnpm typecheck`, `corepack pnpm build`, `npm run check:api`, and `npm test`.
+  - Built assets now contain `pulse-input`, `默认账号：admin / change-me`, and `请输入账号和密码`; login CSS no longer contains unintended `html.dark` rules.
 
 ## Next Targets
 
