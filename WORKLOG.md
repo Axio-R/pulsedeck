@@ -97,6 +97,16 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm build`: passed.
   - Diff scan confirms no `dist/`, `node_modules/`, `.data/`, runtime JSON, or smoke node data is staged for commit.
   - Token scan found no GitHub token or real panel IP; only the documented default password `change-me` remains in template/test files.
+- Committed and pushed `02ed313 Plan Agent architecture and add node deletion` to `origin/main`.
+- GitHub Actions run `27068182087` for commit `02ed313`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+- `docker compose pull`: pulled the GHCR image after the workflow completed.
+- `docker compose up -d`: recreated and started `pulsedeck-panel`; no local Docker image build was run.
+- `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+- `GET http://127.0.0.1:14770/api/v1/health`: passed with `name: PulseDeck` and `port: 14770`.
+- Post-deploy smoke passed:
+  - Soybean-compatible login with `admin / change-me` returned `R_SUPER`.
+  - Created a temporary node, queued one `probe` command, deleted the node through `DELETE /api/v1/nodes/{nodeId}`, and verified the node was no longer listed.
+  - Delete response reported `deleted: true` and `removedCommands: 1`, confirming related command cleanup.
 
 ### 2026-06-06
 
