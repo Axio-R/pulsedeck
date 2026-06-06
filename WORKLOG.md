@@ -83,7 +83,7 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - Rewrote the installer to detect `linux-x64`, `linux-arm64`, or `linux-armv7l`, download the Rust binary, create `PK`/`pk`/`RK`/`rk` shortcuts, and install systemd/OpenRC/cron/manual service startup.
   - Changed the API runtime endpoint to serve `agent-dist/{target}/pulsedeck-agent` binaries.
   - Updated the Dockerfile so GitHub Actions builds and packages Rust Agent binaries for x64, arm64, and armv7l without any local Docker build.
-  - Added QEMU setup in the GHCR workflow for the cross-architecture Agent build stages.
+  - Cross-architecture Agent packaging uses Rust musl targets from a single Rust Alpine build stage, avoiding separate arm/v7 base image manifests.
   - Updated tests, README, settings UI, and Agent/architecture docs for the Rust-only Agent direction.
   - Local machine has no `cargo`; Rust compilation will be validated by GitHub Actions/GHCR.
 - Local verification after Rust Agent replacement:
@@ -92,6 +92,9 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm typecheck`: passed.
   - `corepack pnpm build`: passed.
   - No local Docker image build was performed.
+- GHCR workflow run `27069058020` for commit `d5f24a5` failed before image build:
+  - Failure cause: `rust:1.87-alpine` has no `linux/arm/v7` manifest for a separate `FROM --platform=linux/arm/v7` build stage.
+  - Fix in progress: compile `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, and `armv7-unknown-linux-musleabihf` from one Rust Alpine stage and package them as `linux-x64`, `linux-arm64`, and `linux-armv7l`.
 - User clarified PulseDeck positioning: lightweight personal node and subscription management panel, not a heavy multi-tenant operations platform.
 - New planning requirements captured:
   - Create a complete project function design and staged roadmap.
