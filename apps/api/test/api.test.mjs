@@ -126,6 +126,105 @@ test('created nodes can be deleted with related commands purged', async () => {
   }
 });
 
+test('nodes support automatic network discovery, protocol commands, and link reset', async () => {
+  const app = await startServer();
+  try {
+    const login = await request(app.base, '/api/v1/auth/login', {
+      method: 'POST',
+      body: { username: 'admin', password: 'change-me' }
+    });
+    const auth = { authorization: `Bearer ${login.body.token}` };
+
+    const protocols = await request(app.base, '/api/v1/protocols', { headers: auth });
+    assert.equal(protocols.res.status, 200);
+    assert.ok(protocols.body.items.some((item) => item.type === 'vless'));
+    assert.ok(protocols.body.items.some((item) => item.type === 'anytls'));
+
+    const created = await request(app.base, '/api/v1/nodes', {
+      method: 'POST',
+      headers: auth,
+      body: { name: 'auto-region-node' }
+    });
+    assert.equal(created.res.status, 201);
+    assert.equal(created.body.region, '');
+    assert.equal(created.body.network.regionSource, 'auto-pending');
+
+    const agentEnroll = await request(app.base, `/api/v1/agents/enroll/${created.body.installId}`, {
+      method: 'POST',
+      body: {
+        version: '0.1.0-rust',
+        platform: 'linux',
+        arch: 'x86_64',
+        installDir: '/var/lib/pulsedeck',
+        serviceMode: 'manual',
+        addresses: [
+          { interface: 'eth0', family: 'ipv4', address: '198.51.100.10', cidr: '198.51.100.10/24' },
+          { interface: 'eth0', family: 'ipv6', address: '2001:4860:4860::8888', cidr: '2001:4860:4860::8888/64' }
+        ]
+      }
+    });
+    assert.equal(agentEnroll.res.status, 200);
+
+    const listed = await request(app.base, '/api/v1/nodes', { headers: auth });
+    const discovered = listed.body.items.find((node) => node.id === created.body.id);
+    assert.equal(discovered.network.primaryIpv4, '198.51.100.10');
+    assert.equal(discovered.network.primaryIpv6, '2001:4860:4860::8888');
+    assert.equal(discovered.network.ipMode, 'dual-stack');
+
+    const patched = await request(app.base, `/api/v1/nodes/${created.body.id}`, {
+      method: 'PATCH',
+      headers: auth,
+      body: { region: 'JP', traffic: { thresholdBytes: 1024, autoDisableSubscription: true } }
+    });
+    assert.equal(patched.res.status, 200);
+    assert.equal(patched.body.region, 'JP');
+    assert.equal(patched.body.regionOverride, true);
+    assert.equal(patched.body.traffic.thresholdBytes, 1024);
+
+    const added = await request(app.base, `/api/v1/nodes/${created.body.id}/protocols`, {
+      method: 'POST',
+      headers: auth,
+      body: { type: 'vless', port: 443, variant: 'reality' }
+    });
+    assert.equal(added.res.status, 201);
+    assert.equal(added.body.protocol.type, 'vless');
+    assert.equal(added.body.protocol.port, 443);
+    assert.equal(added.body.command.type, 'protocol-add');
+
+    const reset = await request(app.base, `/api/v1/nodes/${created.body.id}/links/reset`, {
+      method: 'POST',
+      headers: auth
+    });
+    assert.equal(reset.res.status, 201);
+    assert.equal(reset.body.type, 'reset-links');
+
+    const removed = await request(app.base, `/api/v1/nodes/${created.body.id}/protocols/${added.body.protocol.id}`, {
+      method: 'DELETE',
+      headers: auth
+    });
+    assert.equal(removed.res.status, 200);
+    assert.equal(removed.body.deleted, true);
+    assert.equal(removed.body.command.type, 'protocol-delete');
+
+    const policy = await request(app.base, '/api/v1/alert-policy', { headers: auth });
+    assert.equal(policy.res.status, 200);
+    assert.equal(policy.body.autoDisableOnTrafficLimit, true);
+
+    const patchedPolicy = await request(app.base, '/api/v1/alert-policy', {
+      method: 'PATCH',
+      headers: auth,
+      body: { offlineAfterSeconds: 300, offlineChannels: ['telegram'], trafficChannels: ['email'], autoDisableOnTrafficLimit: false }
+    });
+    assert.equal(patchedPolicy.res.status, 200);
+    assert.equal(patchedPolicy.body.offlineAfterSeconds, 300);
+    assert.deepEqual(patchedPolicy.body.offlineChannels, ['telegram']);
+    assert.deepEqual(patchedPolicy.body.trafficChannels, ['email']);
+    assert.equal(patchedPolicy.body.autoDisableOnTrafficLimit, false);
+  } finally {
+    await app.close();
+  }
+});
+
 test('soybean auth contract returns wrapped login token and user info', async () => {
   const app = await startServer();
   try {

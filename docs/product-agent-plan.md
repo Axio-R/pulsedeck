@@ -23,7 +23,10 @@ It is not designed as a heavy multi-tenant airport platform, billing system, or 
 ## Current Gaps
 
 - Node create/list/delete exists, including cleanup of related Agent and command records.
-- Subscription Profile deletion exists for custom Profiles, but subscription link lifecycle needs stronger UX around reset/regenerate.
+- Node protocol records and remote protocol add/delete commands exist for VMess, VLESS, Trojan, Shadowsocks, Hysteria2, Tuic, and AnyTLS. The Rust Agent still needs the real sing-box executor that turns these commands into installed proxy services.
+- Subscription Profile deletion exists for custom Profiles, and node-level reset-link command queuing exists. Agent-side link regeneration still needs full sing-box integration.
+- Agent reports host addresses; the panel classifies IPv4-only, IPv6-only, dual-stack, private/LXC, and WARP IPv4 plus IPv6 style nodes. Full GeoIP/Geosite database integration is not wired yet.
+- Panel-side cumulative traffic accounting and threshold auto-disable exist from metrics snapshots. Real-time traffic rates still need the WebSocket collector.
 - Rust Agent command queue is HTTP polling today; real-time bidirectional WebSocket control is not implemented yet.
 - Traffic metrics are periodic snapshots today; real-time per-second rate streaming needs a dedicated protocol.
 - Local runtime data is ignored by `.gitignore`, but broader runtime JSON and database patterns should also be ignored.
@@ -45,9 +48,10 @@ It is not designed as a heavy multi-tenant airport platform, billing system, or 
 - Delete node and cleanup related Agent/command records.
 - Copy install command.
 - Reset install/subscription identity.
+- Add/delete protocol entries and queue remote Agent commands.
 - View Agent status, version, platform, architecture, install path, service mode, and last seen time.
 - View addresses and route hints: IPv4, IPv6, WARP, private/LXC addresses.
-- View current upload/download speed and cumulative traffic.
+- View cumulative traffic and traffic threshold state.
 - Trigger diagnostics and sing-box actions.
 
 ### Agent Install And Lifecycle
@@ -61,6 +65,8 @@ It is not designed as a heavy multi-tenant airport platform, billing system, or 
 ### sing-box Management
 
 - Install/update/reinstall sing-box.
+- Manage protocol definitions: VMess, VLESS, Trojan, Shadowsocks, Hysteria2, Tuic, AnyTLS, and variants.
+- Support per-node protocol port settings.
 - Render node config from panel templates.
 - Apply config to node.
 - Restart sing-box.

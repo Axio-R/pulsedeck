@@ -1,10 +1,11 @@
 import http from 'node:http';
 import { createReadStream } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { createNode, JsonStore, nowIso, randomToken } from './store.mjs';
+import { createNode, createNodeProtocol, JsonStore, nowIso, randomToken, SUPPORTED_PROXY_PROTOCOLS } from './store.mjs';
 import { renderAgentInstallScript } from './install-script.mjs';
 
 const ROOT_DIR = fileURLToPath(new URL('../../..', import.meta.url));
@@ -118,6 +119,15 @@ function presentProfile(profile, req) {
   };
 }
 
+function presentNode(node, req) {
+  return {
+    ...node,
+    online: isRecent(node.lastSeenAt),
+    displayRegion: node.region || node.network?.detectedRegion || '自动识别中',
+    installCommand: `curl -fsSL '${publicBaseUrl(req)}/api/v1/agents/install/${encodeURIComponent(node.installId)}' | sh`
+  };
+}
+
 function dashboard(data) {
   const onlineNodes = data.nodes.filter((node) => isRecent(node.lastSeenAt));
   const warningNodes = data.nodes.filter((node) => node.status === 'warning' || node.agentStatus === 'degraded');
@@ -158,6 +168,176 @@ function average(values) {
   return Math.round((values.reduce((sum, value) => sum + value, 0) / values.length) * 10) / 10;
 }
 
+function clientAddress(req) {
+  const raw = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '')
+    .split(',')[0]
+    .trim()
+    .replace(/^::ffff:/, '');
+  return net.isIP(raw) ? raw : '';
+}
+
+function normalizeAddressItem(item) {
+  if (!item || typeof item !== 'object') return null;
+  const address = String(item.address || item.ip || '').split('/')[0].trim();
+  if (!net.isIP(address)) return null;
+  const family = net.isIP(address) === 6 ? 'ipv6' : 'ipv4';
+  return {
+    interface: String(item.interface || item.name || item.iface || '').trim(),
+    family,
+    address,
+    cidr: item.cidr ? String(item.cidr).trim() : ''
+  };
+}
+
+function addressesFromAgent(input, req) {
+  const items = Array.isArray(input) ? input.map(normalizeAddressItem).filter(Boolean) : [];
+  const remote = clientAddress(req);
+  if (remote) {
+    items.push({
+      interface: 'remote',
+      family: net.isIP(remote) === 6 ? 'ipv6' : 'ipv4',
+      address: remote,
+      cidr: ''
+    });
+  }
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = `${item.interface}:${item.address}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function isPrivateIpv4(ip) {
+  const parts = ip.split('.').map((part) => Number(part));
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return true;
+  const [a, b] = parts;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    a >= 224
+  );
+}
+
+function isPrivateIpv6(ip) {
+  const lower = ip.toLowerCase();
+  return lower === '::1' || lower.startsWith('fe80:') || lower.startsWith('fc') || lower.startsWith('fd') || lower.startsWith('2001:db8:');
+}
+
+function isPublicAddress(item) {
+  if (item.family === 'ipv4') return !isPrivateIpv4(item.address);
+  if (item.family === 'ipv6') return !isPrivateIpv6(item.address);
+  return false;
+}
+
+function detectGeoRegion(_ip) {
+  // Placeholder for local GeoIP/Geosite database integration. The API shape is stable now.
+  return { region: '', countryCode: '', city: '', source: 'geoip-pending' };
+}
+
+function analyzeAddresses(addresses = []) {
+  const normalized = addresses.map(normalizeAddressItem).filter(Boolean);
+  const publicAddresses = normalized.filter(isPublicAddress);
+  const publicIpv4 = publicAddresses.find((item) => item.family === 'ipv4') || null;
+  const publicIpv6 = publicAddresses.find((item) => item.family === 'ipv6') || null;
+  const anyIpv4 = normalized.find((item) => item.family === 'ipv4') || null;
+  const anyIpv6 = normalized.find((item) => item.family === 'ipv6') || null;
+  const warpLikely = normalized.some((item) => /warp|wgcf|cloudflare|wireguard|^wg/i.test(item.interface)) || (!publicIpv4 && anyIpv4 && publicIpv6);
+  const primaryIpv4 = publicIpv4?.address || anyIpv4?.address || null;
+  const primaryIpv6 = publicIpv6?.address || anyIpv6?.address || null;
+  let ipMode = 'unknown';
+  if (warpLikely && anyIpv4 && publicIpv6) ipMode = 'warp-v4-ipv6';
+  else if (publicIpv4 && publicIpv6) ipMode = 'dual-stack';
+  else if (publicIpv4) ipMode = 'ipv4-only';
+  else if (publicIpv6) ipMode = 'ipv6-only';
+  else if (anyIpv4 && anyIpv6) ipMode = 'private-dual-stack';
+  else if (anyIpv4) ipMode = 'private-ipv4';
+  else if (anyIpv6) ipMode = 'private-ipv6';
+
+  const geo = detectGeoRegion(publicIpv4?.address || publicIpv6?.address || '');
+  return {
+    primaryIpv4,
+    primaryIpv6,
+    ipMode,
+    publicAddresses,
+    warpLikely,
+    detectedRegion: geo.region,
+    regionSource: geo.region ? geo.source : 'auto-pending',
+    updatedAt: nowIso()
+  };
+}
+
+function applyNetworkDiscovery(node, addresses) {
+  if (!Array.isArray(addresses)) return;
+  const normalized = addresses.map(normalizeAddressItem).filter(Boolean);
+  node.addresses = normalized;
+  const analysis = analyzeAddresses(normalized);
+  node.network = { ...(node.network || {}), ...analysis };
+  if (!node.regionOverride && analysis.detectedRegion) {
+    node.region = analysis.detectedRegion;
+  }
+}
+
+function metricsTraffic(metrics) {
+  const interfaces = Array.isArray(metrics?.network?.interfaces) ? metrics.network.interfaces : [];
+  return interfaces.reduce(
+    (total, item) => ({
+      rx: total.rx + (Number(item.rxBytes) || 0),
+      tx: total.tx + (Number(item.txBytes) || 0)
+    }),
+    { rx: 0, tx: 0 }
+  );
+}
+
+function addAlertEvent(data, event) {
+  data.alertEvents ||= [];
+  data.alertEvents.push({
+    id: randomUUID(),
+    status: 'pending',
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    ...event
+  });
+}
+
+function updateTrafficAccounting(data, node, metrics) {
+  const current = metricsTraffic(metrics);
+  if (!current.rx && !current.tx) return;
+  const traffic = node.traffic || {};
+  const lastRx = Number(traffic.lastRxBytes) || 0;
+  const lastTx = Number(traffic.lastTxBytes) || 0;
+  const deltaRx = lastRx > 0 && current.rx >= lastRx ? current.rx - lastRx : 0;
+  const deltaTx = lastTx > 0 && current.tx >= lastTx ? current.tx - lastTx : 0;
+  traffic.totalRxBytes = (Number(traffic.totalRxBytes) || 0) + deltaRx;
+  traffic.totalTxBytes = (Number(traffic.totalTxBytes) || 0) + deltaTx;
+  traffic.totalBytes = traffic.totalRxBytes + traffic.totalTxBytes;
+  traffic.lastRxBytes = current.rx;
+  traffic.lastTxBytes = current.tx;
+  traffic.updatedAt = nowIso();
+  const threshold = Number(traffic.thresholdBytes) || 0;
+  if (threshold > 0 && traffic.totalBytes >= threshold && !traffic.thresholdExceededAt) {
+    traffic.thresholdExceededAt = nowIso();
+    node.status = 'warning';
+    const autoDisable = traffic.autoDisableSubscription || node.alertPolicy?.autoDisableOnTrafficLimit || data.alertPolicy?.autoDisableOnTrafficLimit;
+    if (autoDisable) node.subscriptionEnabled = false;
+    addAlertEvent(data, {
+      nodeId: node.id,
+      type: 'traffic-threshold',
+      level: 'warning',
+      message: `Node ${node.name} exceeded traffic threshold`,
+      channels: node.alertPolicy?.trafficChannels || data.alertPolicy?.trafficChannels || []
+    });
+  }
+  node.traffic = traffic;
+}
+
 function subscriptionLinks(data) {
   return data.nodes
     .filter((node) => node.subscriptionEnabled && isRecent(node.lastSeenAt, 24 * 60 * 60 * 1000))
@@ -194,8 +374,11 @@ function updateNodeFromAgent(data, node, agent, patch = {}) {
   node.agentStatus = patch.agentStatus || 'online';
   node.lastSeenAt = timestamp;
   node.updatedAt = timestamp;
-  if (Array.isArray(patch.addresses)) node.addresses = patch.addresses;
-  if (patch.metrics) node.metrics = patch.metrics;
+  if (Array.isArray(patch.addresses)) applyNetworkDiscovery(node, patch.addresses);
+  if (patch.metrics) {
+    node.metrics = patch.metrics;
+    updateTrafficAccounting(data, node, patch.metrics);
+  }
   if (patch.diagnostics) node.diagnostics = patch.diagnostics;
   if (Array.isArray(patch.reportedLinks)) node.reportedLinks = patch.reportedLinks;
 
@@ -360,7 +543,7 @@ async function handleApi(req, res, store, url) {
         arch: body.arch,
         installDir: body.installDir,
         serviceMode: body.serviceMode,
-        addresses: body.addresses || []
+        addresses: addressesFromAgent(body.addresses, req)
       });
       response = {
         agentId: agent.id,
@@ -390,7 +573,12 @@ async function handleApi(req, res, store, url) {
       await store.update((draft) => {
         const draftAgent = draft.agents.find((item) => item.id === agentId);
         const draftNode = draft.nodes.find((item) => item.id === draftAgent?.nodeId);
-        if (draftAgent && draftNode) updateNodeFromAgent(draft, draftNode, draftAgent, body);
+        if (draftAgent && draftNode) {
+          updateNodeFromAgent(draft, draftNode, draftAgent, {
+            ...body,
+            addresses: addressesFromAgent(body.addresses, req)
+          });
+        }
       });
       return sendJson(res, 200, { accepted: true, time: nowIso() });
     }
@@ -403,7 +591,7 @@ async function handleApi(req, res, store, url) {
         if (draftAgent && draftNode) {
           updateNodeFromAgent(draft, draftNode, draftAgent, {
             metrics: body.metrics || body,
-            addresses: body.addresses,
+            addresses: addressesFromAgent(body.addresses, req),
             reportedLinks: body.reportedLinks
           });
         }
@@ -465,13 +653,19 @@ async function handleApi(req, res, store, url) {
     return sendJson(res, 200, dashboard(data));
   }
 
+  if (method === 'GET' && url.pathname === '/api/v1/protocols') {
+    return sendJson(res, 200, { items: SUPPORTED_PROXY_PROTOCOLS });
+  }
+
+  if (method === 'GET' && url.pathname === '/api/v1/geoip/lookup') {
+    const ip = String(url.searchParams.get('ip') || '').trim();
+    if (!net.isIP(ip)) return badRequest(res, 'invalid ip');
+    return sendJson(res, 200, { ip, ...detectGeoRegion(ip) });
+  }
+
   if (method === 'GET' && url.pathname === '/api/v1/nodes') {
     return sendJson(res, 200, {
-      items: data.nodes.map((node) => ({
-        ...node,
-        online: isRecent(node.lastSeenAt),
-        installCommand: `curl -fsSL '${publicBaseUrl(req)}/api/v1/agents/install/${encodeURIComponent(node.installId)}' | sh`
-      }))
+      items: data.nodes.map((node) => presentNode(node, req))
     });
   }
 
@@ -482,13 +676,42 @@ async function handleApi(req, res, store, url) {
       node = createNode(body);
       draft.nodes.push(node);
     });
-    return sendJson(res, 201, {
-      ...node,
-      installCommand: `curl -fsSL '${publicBaseUrl(req)}/api/v1/agents/install/${encodeURIComponent(node.installId)}' | sh`
-    });
+    return sendJson(res, 201, presentNode(node, req));
   }
 
-  if (method === 'DELETE' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'nodes' && segments[3]) {
+  if ((method === 'PUT' || method === 'PATCH') && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'nodes' && segments[3] && !segments[4]) {
+    const nodeId = segments[3];
+    const body = await readJson(req);
+    let node;
+    await store.update((draft) => {
+      node = draft.nodes.find((item) => item.id === nodeId);
+      if (!node) return;
+      if (body.name !== undefined) node.name = String(body.name).trim() || node.name;
+      if (body.region !== undefined) {
+        node.region = String(body.region).trim();
+        node.regionOverride = Boolean(node.region);
+        node.network = { ...(node.network || {}), regionSource: node.region ? 'manual' : 'auto-pending' };
+      }
+      if (Array.isArray(body.tags)) node.tags = body.tags.map((tag) => String(tag).trim()).filter(Boolean);
+      if (body.subscriptionEnabled !== undefined) node.subscriptionEnabled = body.subscriptionEnabled === true;
+      if (body.traffic && typeof body.traffic === 'object') {
+        node.traffic = {
+          ...(node.traffic || {}),
+          ...(body.traffic.thresholdBytes !== undefined ? { thresholdBytes: Number(body.traffic.thresholdBytes) || 0 } : {}),
+          ...(body.traffic.warningPercent !== undefined ? { warningPercent: Number(body.traffic.warningPercent) || 80 } : {}),
+          ...(body.traffic.autoDisableSubscription !== undefined ? { autoDisableSubscription: body.traffic.autoDisableSubscription === true } : {})
+        };
+      }
+      if (body.alertPolicy && typeof body.alertPolicy === 'object') {
+        node.alertPolicy = { ...(node.alertPolicy || {}), ...body.alertPolicy };
+      }
+      node.updatedAt = nowIso();
+    });
+    if (!node) return notFound(res);
+    return sendJson(res, 200, presentNode(node, req));
+  }
+
+  if (method === 'DELETE' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'nodes' && segments[3] && !segments[4]) {
     const nodeId = segments[3];
     const node = data.nodes.find((item) => item.id === nodeId);
     if (!node) return notFound(res);
@@ -505,6 +728,90 @@ async function handleApi(req, res, store, url) {
       removedCommands = beforeCommands - draft.commands.length;
     });
     return sendJson(res, 200, { deleted: true, removedAgents, removedCommands });
+  }
+
+  if (method === 'POST' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'nodes' && segments[3] && segments[4] === 'links' && segments[5] === 'reset') {
+    const nodeId = segments[3];
+    let command;
+    await store.update((draft) => {
+      const node = draft.nodes.find((item) => item.id === nodeId);
+      if (!node) return;
+      node.linkSecret = randomToken(18);
+      node.reportedLinks = [];
+      node.updatedAt = nowIso();
+      command = {
+        id: randomUUID(),
+        nodeId,
+        agentId: null,
+        type: 'reset-links',
+        payload: { linkSecret: node.linkSecret },
+        status: 'queued',
+        result: null,
+        createdAt: nowIso(),
+        updatedAt: nowIso()
+      };
+      draft.commands.push(command);
+    });
+    if (!command) return notFound(res);
+    return sendJson(res, 201, command);
+  }
+
+  if (method === 'POST' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'nodes' && segments[3] && segments[4] === 'protocols') {
+    const nodeId = segments[3];
+    const body = await readJson(req);
+    let protocol;
+    let command;
+    await store.update((draft) => {
+      const node = draft.nodes.find((item) => item.id === nodeId);
+      if (!node) return;
+      protocol = createNodeProtocol(body);
+      node.protocols ||= [];
+      node.protocols.push(protocol);
+      node.updatedAt = nowIso();
+      command = {
+        id: randomUUID(),
+        nodeId,
+        agentId: null,
+        type: 'protocol-add',
+        payload: { protocol },
+        status: 'queued',
+        result: null,
+        createdAt: nowIso(),
+        updatedAt: nowIso()
+      };
+      draft.commands.push(command);
+    });
+    if (!protocol) return notFound(res);
+    return sendJson(res, 201, { protocol, command });
+  }
+
+  if (method === 'DELETE' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'nodes' && segments[3] && segments[4] === 'protocols' && segments[5]) {
+    const nodeId = segments[3];
+    const protocolId = segments[5];
+    let protocol;
+    let command;
+    await store.update((draft) => {
+      const node = draft.nodes.find((item) => item.id === nodeId);
+      if (!node) return;
+      protocol = (node.protocols || []).find((item) => item.id === protocolId);
+      if (!protocol) return;
+      node.protocols = node.protocols.filter((item) => item.id !== protocolId);
+      node.updatedAt = nowIso();
+      command = {
+        id: randomUUID(),
+        nodeId,
+        agentId: null,
+        type: 'protocol-delete',
+        payload: { protocolId, protocol },
+        status: 'queued',
+        result: null,
+        createdAt: nowIso(),
+        updatedAt: nowIso()
+      };
+      draft.commands.push(command);
+    });
+    if (!protocol) return notFound(res);
+    return sendJson(res, 200, { deleted: true, protocol, command });
   }
 
   if (method === 'POST' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'nodes' && segments[3] && segments[4] === 'commands') {
@@ -619,6 +926,26 @@ async function handleApi(req, res, store, url) {
       telegram: maskChannel(channels.telegram),
       email: maskChannel(channels.email)
     });
+  }
+
+  if (method === 'GET' && url.pathname === '/api/v1/alert-policy') {
+    return sendJson(res, 200, data.alertPolicy || {});
+  }
+
+  if ((method === 'PUT' || method === 'PATCH') && url.pathname === '/api/v1/alert-policy') {
+    const body = await readJson(req);
+    let policy;
+    await store.update((draft) => {
+      draft.alertPolicy = {
+        ...(draft.alertPolicy || {}),
+        ...(body.offlineAfterSeconds !== undefined ? { offlineAfterSeconds: Number(body.offlineAfterSeconds) || 180 } : {}),
+        ...(Array.isArray(body.offlineChannels) ? { offlineChannels: body.offlineChannels.map((item) => String(item)).filter(Boolean) } : {}),
+        ...(Array.isArray(body.trafficChannels) ? { trafficChannels: body.trafficChannels.map((item) => String(item)).filter(Boolean) } : {}),
+        ...(body.autoDisableOnTrafficLimit !== undefined ? { autoDisableOnTrafficLimit: body.autoDisableOnTrafficLimit === true } : {})
+      };
+      policy = draft.alertPolicy;
+    });
+    return sendJson(res, 200, policy);
   }
 
   return notFound(res);

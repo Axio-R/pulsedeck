@@ -29,6 +29,8 @@ export interface PulseNode {
   id: string;
   name: string;
   region: string;
+  displayRegion: string;
+  regionOverride: boolean;
   tags: string[];
   installId: string;
   status: string;
@@ -43,8 +45,52 @@ export interface PulseNode {
   };
   diagnostics: null | { checks?: Array<{ name: string; ok: boolean; detail?: string }> };
   reportedLinks: string[];
+  linkSecret: string;
+  protocols: PulseNodeProtocol[];
+  network: {
+    primaryIpv4: string | null;
+    primaryIpv6: string | null;
+    ipMode: string;
+    publicAddresses: Array<{ interface: string; family: string; address: string; cidr?: string }>;
+    warpLikely: boolean;
+    detectedRegion: string;
+    regionSource: string;
+    updatedAt: string | null;
+  };
+  traffic: {
+    totalRxBytes: number;
+    totalTxBytes: number;
+    totalBytes: number;
+    thresholdBytes: number;
+    warningPercent: number;
+    autoDisableSubscription: boolean;
+    thresholdExceededAt: string | null;
+    updatedAt: string | null;
+  };
   installCommand: string;
   online: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PulseProtocolMeta {
+  type: string;
+  name: string;
+  defaultPort: number;
+  variants: string[];
+}
+
+export interface PulseNodeProtocol {
+  id: string;
+  type: string;
+  name: string;
+  port: number;
+  listen: string;
+  enabled: boolean;
+  variant: string;
+  transport: string;
+  security: string;
+  settings: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
 }
@@ -111,6 +157,13 @@ export interface PulseChannels {
   };
 }
 
+export interface PulseAlertPolicy {
+  offlineAfterSeconds: number;
+  offlineChannels: string[];
+  trafficChannels: string[];
+  autoDisableOnTrafficLimit: boolean;
+}
+
 export function fetchPulseDashboard() {
   return pulseFetch<PulseDashboard>('/dashboard');
 }
@@ -119,12 +172,32 @@ export function fetchPulseNodes() {
   return pulseFetch<{ items: PulseNode[] }>('/nodes');
 }
 
+export function fetchPulseProtocols() {
+  return pulseFetch<{ items: PulseProtocolMeta[] }>('/protocols');
+}
+
 export function createPulseNode(body: { name: string; region?: string; tags?: string[] }) {
   return pulseFetch<PulseNode>('/nodes', { method: 'POST', body });
 }
 
+export function updatePulseNode(id: string, body: Partial<Pick<PulseNode, 'name' | 'region' | 'tags' | 'subscriptionEnabled'>> & { traffic?: Partial<PulseNode['traffic']> }) {
+  return pulseFetch<PulseNode>(`/nodes/${id}`, { method: 'PATCH', body });
+}
+
 export function deletePulseNode(id: string) {
   return pulseFetch<{ deleted: boolean; removedAgents: number; removedCommands: number }>(`/nodes/${id}`, { method: 'DELETE' });
+}
+
+export function resetPulseNodeLinks(id: string) {
+  return pulseFetch<PulseCommand>(`/nodes/${id}/links/reset`, { method: 'POST' });
+}
+
+export function createPulseNodeProtocol(nodeId: string, body: { type: string; port?: number | null; variant?: string; name?: string }) {
+  return pulseFetch<{ protocol: PulseNodeProtocol; command: PulseCommand }>(`/nodes/${nodeId}/protocols`, { method: 'POST', body });
+}
+
+export function deletePulseNodeProtocol(nodeId: string, protocolId: string) {
+  return pulseFetch<{ deleted: boolean; protocol: PulseNodeProtocol; command: PulseCommand }>(`/nodes/${nodeId}/protocols/${protocolId}`, { method: 'DELETE' });
 }
 
 export function queuePulseCommand(nodeId: string, type: string, payload: Record<string, unknown> = {}) {
@@ -157,4 +230,12 @@ export function fetchPulseChannels() {
 
 export function savePulseChannels(body: PulseChannels) {
   return pulseFetch<PulseChannels>('/notification-channels', { method: 'PATCH', body });
+}
+
+export function fetchPulseAlertPolicy() {
+  return pulseFetch<PulseAlertPolicy>('/alert-policy');
+}
+
+export function savePulseAlertPolicy(body: PulseAlertPolicy) {
+  return pulseFetch<PulseAlertPolicy>('/alert-policy', { method: 'PATCH', body });
 }

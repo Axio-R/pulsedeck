@@ -90,6 +90,7 @@ fn run_once(config: &Config) -> Result<State, String> {
         state = enroll(config, state)?;
     }
 
+    let addresses = collect_addresses_json();
     let metrics = collect_metrics_json();
     let diagnostics = collect_diagnostics_json(config);
 
@@ -98,12 +99,13 @@ fn run_once(config: &Config) -> Result<State, String> {
         &format!("/api/v1/agents/{}/heartbeat", url_component(&state.agent_id)),
         &state.token,
         &format!(
-            "{{\"version\":\"{}\",\"platform\":\"{}\",\"arch\":\"{}\",\"installDir\":\"{}\",\"serviceMode\":\"{}\",\"addresses\":[]}}",
+            "{{\"version\":\"{}\",\"platform\":\"{}\",\"arch\":\"{}\",\"installDir\":\"{}\",\"serviceMode\":\"{}\",\"addresses\":{}}}",
             json_escape(VERSION),
             json_escape(os_name()),
             json_escape(arch_name()),
             json_escape(&config.agent_home),
-            json_escape(&config.service_mode)
+            json_escape(&config.service_mode),
+            &addresses
         ),
     )?;
 
@@ -111,7 +113,7 @@ fn run_once(config: &Config) -> Result<State, String> {
         config,
         &format!("/api/v1/agents/{}/metrics", url_component(&state.agent_id)),
         &state.token,
-        &format!("{{\"metrics\":{metrics},\"addresses\":[],\"reportedLinks\":[]}}"),
+        &format!("{{\"metrics\":{metrics},\"addresses\":{},\"reportedLinks\":[]}}", &addresses),
     )?;
 
     post_json(
@@ -130,13 +132,15 @@ fn run_once(config: &Config) -> Result<State, String> {
 }
 
 fn enroll(config: &Config, mut state: State) -> Result<State, String> {
+    let addresses = collect_addresses_json();
     let body = format!(
-        "{{\"version\":\"{}\",\"platform\":\"{}\",\"arch\":\"{}\",\"installDir\":\"{}\",\"serviceMode\":\"{}\",\"addresses\":[]}}",
+        "{{\"version\":\"{}\",\"platform\":\"{}\",\"arch\":\"{}\",\"installDir\":\"{}\",\"serviceMode\":\"{}\",\"addresses\":{}}}",
         json_escape(VERSION),
         json_escape(os_name()),
         json_escape(arch_name()),
         json_escape(&config.agent_home),
-        json_escape(&config.service_mode)
+        json_escape(&config.service_mode),
+        &addresses
     );
     let response = post_json(
         config,
@@ -168,7 +172,7 @@ fn poll_commands(config: &Config, state: &State) -> Result<(), String> {
             "diagnostics" => collect_diagnostics_json(config),
             "metrics" | "probe" => collect_metrics_json(),
             "restart" => "{\"message\":\"restart acknowledged by Rust Agent\"}".to_string(),
-            "sing-box-install" | "sing-box-reinstall" | "sing-box-render" | "sing-box-apply" | "sing-box-restart" => {
+            "reset-links" | "protocol-add" | "protocol-delete" | "sing-box-install" | "sing-box-reinstall" | "sing-box-render" | "sing-box-apply" | "sing-box-restart" => {
                 format!(
                     "{{\"message\":\"{} is planned for the Rust Agent command runner\",\"agentVersion\":\"{}\"}}",
                     json_escape(&command_type),
@@ -271,11 +275,75 @@ fn state_to_json(state: &State) -> String {
     )
 }
 
+fn collect_addresses_json() -> String {
+    let output = Command::new("ip")
+        .args(["-o", "addr", "show", "scope", "global"])
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let raw = String::from_utf8_lossy(&output.stdout);
+            let mut rows = Vec::new();
+            for line in raw.lines() {
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                if cols.len() < 4 {
+                    continue;
+                }
+                let iface = cols.get(1).copied().unwrap_or("").trim_end_matches(':');
+                let family = match cols.get(2).copied().unwrap_or("") {
+                    "inet" => "ipv4",
+                    "inet6" => "ipv6",
+                    _ => continue,
+                };
+                let cidr = cols.get(3).copied().unwrap_or("");
+                let address = cidr.split('/').next().unwrap_or("");
+                if address.is_empty() || iface.is_empty() {
+                    continue;
+                }
+                rows.push(format!(
+                    "{{\"interface\":\"{}\",\"family\":\"{}\",\"address\":\"{}\",\"cidr\":\"{}\"}}",
+                    json_escape(iface),
+                    json_escape(family),
+                    json_escape(address),
+                    json_escape(cidr)
+                ));
+            }
+            if !rows.is_empty() {
+                return format!("[{}]", rows.join(","));
+            }
+        }
+    }
+
+    let output = Command::new("hostname").arg("-I").output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let raw = String::from_utf8_lossy(&output.stdout);
+            let rows: Vec<String> = raw
+                .split_whitespace()
+                .filter(|address| !address.is_empty())
+                .map(|address| {
+                    let family = if address.contains(':') { "ipv6" } else { "ipv4" };
+                    format!(
+                        "{{\"interface\":\"hostname\",\"family\":\"{}\",\"address\":\"{}\",\"cidr\":\"\"}}",
+                        family,
+                        json_escape(address)
+                    )
+                })
+                .collect();
+            if !rows.is_empty() {
+                return format!("[{}]", rows.join(","));
+            }
+        }
+    }
+
+    "[]".to_string()
+}
+
 fn collect_metrics_json() -> String {
     let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
     let loadavg = fs::read_to_string("/proc/loadavg").unwrap_or_default();
     let uptime = fs::read_to_string("/proc/uptime").unwrap_or_default();
     let netdev = fs::read_to_string("/proc/net/dev").unwrap_or_default();
+    let addresses = collect_addresses_json();
     let (mem_total, mem_available) = parse_meminfo(&meminfo);
     let mem_used = mem_total.saturating_sub(mem_available);
     let mem_usage = if mem_total > 0 {
@@ -290,7 +358,7 @@ fn collect_metrics_json() -> String {
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(0.0);
     format!(
-        "{{\"collectedAt\":\"{}\",\"platform\":\"{}\",\"arch\":\"{}\",\"release\":\"{}\",\"hostname\":\"{}\",\"uptimeSeconds\":{},\"cpu\":{{\"cores\":{},\"load\":{{\"one\":{},\"five\":{},\"fifteen\":{}}},\"usagePercent\":null}},\"memory\":{{\"totalBytes\":{},\"availableBytes\":{},\"usedBytes\":{},\"usagePercent\":{}}},\"network\":{{\"interfaces\":{},\"addresses\":[]}},\"collector\":{{\"runtime\":\"rust\",\"version\":\"{}\"}}}}",
+        "{{\"collectedAt\":\"{}\",\"platform\":\"{}\",\"arch\":\"{}\",\"release\":\"{}\",\"hostname\":\"{}\",\"uptimeSeconds\":{},\"cpu\":{{\"cores\":{},\"load\":{{\"one\":{},\"five\":{},\"fifteen\":{}}},\"usagePercent\":null}},\"memory\":{{\"totalBytes\":{},\"availableBytes\":{},\"usedBytes\":{},\"usagePercent\":{}}},\"network\":{{\"interfaces\":{},\"addresses\":{}}},\"collector\":{{\"runtime\":\"rust\",\"version\":\"{}\"}}}}",
         json_escape(&now_string()),
         json_escape(os_name()),
         json_escape(arch_name()),
@@ -306,6 +374,7 @@ fn collect_metrics_json() -> String {
         mem_used,
         mem_usage,
         parse_netdev_json(&netdev),
+        addresses,
         json_escape(VERSION)
     )
 }

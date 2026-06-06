@@ -67,6 +67,38 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 
 ### 2026-06-07
 
+- User clarified the PulseDeck product capability target for the current project:
+  - One-command Agent deployment and automatic node information reporting.
+  - Mainstream proxy protocol management: VMess, VLESS, Trojan, Shadowsocks, Hysteria2, Tuic, AnyTLS, and variants.
+  - Real-time node status monitoring and traffic accounting.
+  - Remote link reset and remote protocol add/delete.
+  - Multi-channel offline alerts, traffic threshold alerts, and automatic node/subscription removal from distribution when thresholds are exceeded.
+  - Per-node personalized protocol and port settings.
+  - GeoIP/Geosite integration, automatic node region detection at create/enroll time, with manual correction when detection is wrong.
+  - Automatic IP mode detection including IPv4-only, IPv6-only, dual-stack, and WARP IPv4 plus IPv6 style hosts.
+- Implementation direction for this turn:
+  - Add first-class node protocol records and supported protocol metadata.
+  - Add remote protocol add/delete and reset-link command endpoints.
+  - Add node network discovery fields: primary IPv4/IPv6, IP mode, detected region, region source, and manual region override.
+  - Extend the Rust Agent to report host IP addresses instead of empty address arrays.
+  - Add traffic accounting policy fields and threshold enforcement in the panel data model.
+  - Update node UI so region is optional/auto-detected and protocol/port controls are visible.
+- Implementation completed in this turn:
+  - Added supported protocol metadata for VMess, VLESS, Trojan, Shadowsocks, Hysteria2, Tuic, and AnyTLS.
+  - Added node protocol records, per-protocol port/variant settings, and remote `protocol-add` / `protocol-delete` command queueing.
+  - Added node `reset-links` command queueing and link-secret rotation.
+  - Added automatic network classification fields: primary IPv4, primary IPv6, IP mode, WARP-likely flag, detected region, and region source.
+  - Extended the Rust Agent to report global interface addresses via `ip -o addr` with `hostname -I` fallback.
+  - Added cumulative traffic accounting from reported interface counters, traffic threshold events, and subscription auto-disable when configured.
+  - Added global alert policy API/UI for offline timeout, Telegram/email channel selection, traffic channel selection, and auto-disable on traffic limit.
+  - Updated the Nodes UI for optional region, manual region correction, IP mode display, protocol add/delete, and reset-link operation.
+  - Updated product and architecture docs to distinguish current control-plane support from the still-pending Rust sing-box executor.
+- Local verification after protocol/network/alert work:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 7 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - No local Docker image build was performed.
 - User requested a full Agent direction change:
   - Remove the Node.js Agent.
   - Use Rust for the Agent.

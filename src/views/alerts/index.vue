@@ -1,25 +1,39 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue';
-import { fetchPulseChannels, savePulseChannels, type PulseChannels } from '@/service/api';
+import { fetchPulseAlertPolicy, fetchPulseChannels, savePulseAlertPolicy, savePulseChannels, type PulseAlertPolicy, type PulseChannels } from '@/service/api';
 
 const loading = ref(false);
 const channels = reactive<PulseChannels>({
   telegram: { enabled: false, botToken: '', chatId: '', parseMode: 'HTML' },
   email: { enabled: false, smtpHost: '', smtpPort: 587, username: '', password: '', from: '', to: '' }
 });
+const policy = reactive<PulseAlertPolicy>({
+  offlineAfterSeconds: 180,
+  offlineChannels: ['telegram', 'email'],
+  trafficChannels: ['telegram', 'email'],
+  autoDisableOnTrafficLimit: true
+});
+const channelOptions = [
+  { label: 'Telegram', value: 'telegram' },
+  { label: '邮箱', value: 'email' }
+];
 
 async function loadData() {
   loading.value = true;
   try {
-    Object.assign(channels, await fetchPulseChannels());
+    const [channelRes, policyRes] = await Promise.all([fetchPulseChannels(), fetchPulseAlertPolicy()]);
+    Object.assign(channels, channelRes);
+    Object.assign(policy, policyRes);
   } finally {
     loading.value = false;
   }
 }
 
 async function save() {
-  Object.assign(channels, await savePulseChannels(channels));
-  window.$message?.success('告警通道已保存');
+  const [channelRes, policyRes] = await Promise.all([savePulseChannels(channels), savePulseAlertPolicy(policy)]);
+  Object.assign(channels, channelRes);
+  Object.assign(policy, policyRes);
+  window.$message?.success('告警配置已保存');
 }
 
 onMounted(loadData);
@@ -62,6 +76,32 @@ onMounted(loadData);
         </NCard>
       </NGi>
     </NGrid>
-    <NButton type="primary" :loading="loading" @click="save">保存通道</NButton>
+    <NCard title="告警策略" :bordered="false" class="card-wrapper">
+      <NForm label-placement="left" label-width="130">
+        <NFormItem label="离线判定">
+          <NInputNumber v-model:value="policy.offlineAfterSeconds" :min="30" :step="30">
+            <template #suffix>秒</template>
+          </NInputNumber>
+        </NFormItem>
+        <NFormItem label="离线通知渠道">
+          <NCheckboxGroup v-model:value="policy.offlineChannels">
+            <NSpace>
+              <NCheckbox v-for="item in channelOptions" :key="item.value" :value="item.value">{{ item.label }}</NCheckbox>
+            </NSpace>
+          </NCheckboxGroup>
+        </NFormItem>
+        <NFormItem label="流量通知渠道">
+          <NCheckboxGroup v-model:value="policy.trafficChannels">
+            <NSpace>
+              <NCheckbox v-for="item in channelOptions" :key="item.value" :value="item.value">{{ item.label }}</NCheckbox>
+            </NSpace>
+          </NCheckboxGroup>
+        </NFormItem>
+        <NFormItem label="超限剔除">
+          <NSwitch v-model:value="policy.autoDisableOnTrafficLimit" />
+        </NFormItem>
+      </NForm>
+    </NCard>
+    <NButton type="primary" :loading="loading" @click="save">保存告警配置</NButton>
   </NSpace>
 </template>
