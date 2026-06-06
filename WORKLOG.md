@@ -139,6 +139,11 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - Created smoke node `soybean-singbox-smoke`.
   - Fetched the Agent install script and confirmed `PK/pk`, `PULSEDECK_AGENT_HOME`, `/var/lib/pulsedeck`, and x64/arm64/armv7l runtime markers.
   - Subscription Profiles still protect `default-raw` with `deletable: false`.
+- Login validation bug reported after SoybeanAdmin deployment:
+  - The default backend/Compose password is `change-me`, but the upstream SoybeanAdmin form rule only allowed `\\w{6,18}` and blocked hyphenated passwords before sending the login request.
+  - Fixed the frontend password rule to allow 6-64 characters from letters, numbers, and common safe symbols `._-@#$%+!`.
+  - Updated Chinese and English validation messages so the UI no longer says passwords are limited to letters, numbers, and underscores.
+  - Verification after the fix: `corepack pnpm typecheck`, `corepack pnpm build`, `npm run check:api`, and `npm test` all passed.
 
 ## Next Targets
 
