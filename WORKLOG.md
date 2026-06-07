@@ -105,6 +105,23 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `git diff --check`: passed after cleaning generated router typing whitespace.
   - Local API smoke on port `6292`: passed; an hour-old `running` command was automatically marked `failed` with an explicit 15-minute timeout message.
   - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+- Committed and pushed `3811946 Compact node UI and expire stale commands`, then tagged and pushed `v0.2.12`.
+- GitHub Actions and release:
+  - `main` panel image run `27093221271`: failed during `Set up Docker Buildx`, before project build steps; treated as runner/buildx setup failure.
+  - Tag `v0.2.12`: panel image run `27093248993` completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+  - Tag `v0.2.12`: Agent release run `27093248985` completed successfully and published release assets.
+  - Published Agent release assets: `pulsedeck-agent-v0.2.12-linux-x64.tar.gz` 439154 bytes, `pulsedeck-agent-v0.2.12-linux-arm64.tar.gz` 412669 bytes, `pulsedeck-agent-v0.2.12-linux-armv7l.tar.gz` 408127 bytes, and `SHA256SUMS` 326 bytes.
+- Deployment after `v0.2.12`:
+  - `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+  - `docker compose up -d`: recreated and started `pulsedeck-panel`.
+  - `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed with `version: 0.2.12` and `agentVersion: 0.2.12-rust`.
+  - `GET /api/v1/agents/runtime/manifest/linux-x64`: passed with `version: 0.2.12-rust`, `sizeBytes: 909888`, and SHA-256 `6342db188836afbe6491b9192ce333ac2ab12ca5cb56d2e66979653f8adf4770`.
+- Post-deploy smoke passed:
+  - `GET /api/v1/nodes` returned the real `hk` node as `region: HK`, `displayRegion: HK`, and `regionIcon: 🇭🇰`.
+  - `GET /api/v1/commands?limit=20` returned no `running` commands.
+  - The previously stuck `reset-links` command `2ea22cc0-b9a4-4986-9d37-fe45f3256458` was marked `failed` with the 15-minute timeout message.
+  - The real `hk` node currently reports Agent `0.2.11-rust`; latest Agent is `0.2.12-rust`, so an Agent update is available.
 
 ### 2026-06-07 (`v0.2.11`)
 
