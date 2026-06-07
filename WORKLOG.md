@@ -106,6 +106,23 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm build`: passed.
   - `git diff --check`: passed after cleaning generated router typing whitespace.
   - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+- Committed and pushed `fcb1f48 Add traffic history and agent control`.
+- GitHub Actions and release:
+  - Tag `v0.2.6`: panel image run `27088269725` completed successfully.
+  - Tag `v0.2.6`: Agent release run `27088269724` completed successfully and published release assets.
+  - Published Agent release assets: `pulsedeck-agent-v0.2.6-linux-x64.tar.gz` 412709 bytes, `pulsedeck-agent-v0.2.6-linux-arm64.tar.gz` 386759 bytes, `pulsedeck-agent-v0.2.6-linux-armv7l.tar.gz` 380828 bytes, and `SHA256SUMS` 323 bytes.
+- Deployment after `v0.2.6`:
+  - `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+  - `docker compose up -d`: recreated and started `pulsedeck-panel`.
+  - `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed with `version: 0.2.6` and `agentVersion: 0.2.6-rust`.
+  - `GET /api/v1/agents/runtime/manifest/linux-x64`: passed with `version: 0.2.6-rust`, `sizeBytes: 852544`, and SHA-256 `e5055374bb80e222ef42937d44c596d03f3d6cdacf6108543577d303f4867565`.
+- Post-deploy smoke passed against the Compose deployment:
+  - Login with `admin / change-me` succeeded.
+  - Created two temporary `smoke-v026-*` nodes, enrolled a temporary Agent, and posted two metrics samples.
+  - Confirmed deployed traffic history captured the expected RX/TX delta and traffic rank included the smoke node.
+  - Confirmed deployed Agent control WebSocket received a queued command and accepted the result frame.
+  - Confirmed deployed traffic reset API reset the smoke node and deleted both temporary nodes afterward.
 
 - Implementation direction for this turn:
   - Review an external node-control reference implementation at feature level and compare it with PulseDeck without importing its naming into project files.
