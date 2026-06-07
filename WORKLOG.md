@@ -108,6 +108,25 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm build`: passed.
   - `git diff --check`: passed after cleaning generated router typing whitespace.
   - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+- Committed and pushed `019dadc Improve agent locale region and traffic controls`.
+- GitHub Actions and release:
+  - Main panel image run `27086973216`: completed successfully and published the fresh `latest` GHCR image.
+  - Tag `v0.2.5`: panel image run `27087186157` completed successfully.
+  - Tag `v0.2.5`: Agent release run `27087186147` completed successfully and published release assets.
+  - Published Agent release assets: `pulsedeck-agent-v0.2.5-linux-x64.tar.gz` 377433 bytes, `pulsedeck-agent-v0.2.5-linux-arm64.tar.gz` 354167 bytes, `pulsedeck-agent-v0.2.5-linux-armv7l.tar.gz` 349168 bytes, and `SHA256SUMS` 323 bytes.
+- Deployment after `v0.2.5`:
+  - `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+  - `docker compose up -d`: recreated and started `pulsedeck-panel`.
+  - `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed with `version: 0.2.5` and `agentVersion: 0.2.5-rust`.
+  - `GET /api/v1/agents/runtime/manifest/linux-x64`: passed with `version: 0.2.5-rust`, `sizeBytes: 782800`, and SHA-256 `41f5d58f10be474146e8023a6b9bb09cac87f9ae23f986353c3f3401be6707d9`.
+- Post-deploy smoke passed against the Compose deployment:
+  - Login with `admin / change-me` succeeded.
+  - Created a temporary `smoke-v025-*` node with upload-based traffic limit policy.
+  - Confirmed the generated install script contains Chinese checksum and command-hint copy.
+  - Enrolled a temporary Agent with Agent-provided public region fields and confirmed the panel displayed `JP · Kanto · Tokyo`.
+  - Posted two metrics samples and confirmed CPU, upload/download totals, upload threshold enforcement, automatic node subscription disable, and dashboard traffic summary.
+  - Deleted the smoke node after verification.
 - Implementation direction for this turn:
   - Perform a deeper panel/Agent operations pass without adding heavy dependencies.
   - Add real-time node traffic usage charts from the existing traffic WebSocket.
