@@ -113,6 +113,17 @@ function normalizeProtocolSettings(settings, variant, security) {
   return normalized;
 }
 
+function ensureNewProtocolCredentials(type, settings) {
+  const normalized = settings && typeof settings === 'object' && !Array.isArray(settings) ? { ...settings } : {};
+  if (['vmess', 'vless', 'tuic'].includes(type) && !String(normalized.uuid || '').trim()) {
+    normalized.uuid = randomUUID();
+  }
+  if (['shadowsocks', 'trojan', 'hysteria2', 'tuic', 'anytls'].includes(type) && !String(normalized.password || '').trim()) {
+    normalized.password = `pd-${randomToken(18)}`;
+  }
+  return normalized;
+}
+
 function normalizeTraffic(input = {}) {
   const limitMode = ['total', 'download', 'upload'].includes(input.limitMode) ? input.limitMode : 'total';
   const resetMode = ['none', 'daily', 'weekly', 'monthly', 'interval'].includes(input.resetMode) ? input.resetMode : 'none';
@@ -221,8 +232,10 @@ export function createNodeProtocol(input = {}) {
   const port = normalizePort(input.port, defaultProtocolPort(type));
   const variant = String(input.variant || '').trim();
   const security = String(input.security || '').trim();
+  const id = input.id || randomUUID();
+  const settings = normalizeProtocolSettings(input.settings, variant, security);
   return {
-    id: input.id || randomUUID(),
+    id,
     type,
     name: String(input.name || SUPPORTED_PROXY_PROTOCOLS.find((protocol) => protocol.type === type)?.name || type).trim(),
     port,
@@ -231,7 +244,7 @@ export function createNodeProtocol(input = {}) {
     variant,
     transport: String(input.transport || '').trim(),
     security,
-    settings: normalizeProtocolSettings(input.settings, variant, security),
+    settings: input.id ? settings : ensureNewProtocolCredentials(type, settings),
     createdAt: input.createdAt || timestamp,
     updatedAt: input.updatedAt || timestamp
   };

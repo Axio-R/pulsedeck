@@ -9,6 +9,7 @@ import {
   type PulseNode,
   type PulseProfile
 } from '@/service/api';
+import { copyText } from '@/utils/clipboard';
 import { compactRegion, regionBadge } from '@/utils/pulse-format';
 
 const loading = ref(false);
@@ -138,8 +139,8 @@ function filterSummary(profile: PulseProfile) {
 }
 
 async function copyUrl(url: string) {
-  await navigator.clipboard.writeText(url);
-  window.$message?.success('订阅 URL 已复制');
+  if (await copyText(url)) window.$message?.success('订阅 URL 已复制');
+  else window.$message?.error('复制失败，请手动选中订阅 URL');
 }
 
 onMounted(loadData);

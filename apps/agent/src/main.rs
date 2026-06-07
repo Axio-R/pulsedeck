@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const VERSION: &str = "0.2.12-rust";
+const VERSION: &str = "0.2.13-rust";
 const DEFAULT_SING_BOX_VERSION: &str = "1.11.15";
 
 #[derive(Clone, Debug)]
@@ -2567,7 +2567,7 @@ fn protocol_link(protocol: &NodeProtocol, host: &str, secret: &str, node_name: &
             let method = json_get_string(&protocol.settings_json, "method")
                 .or_else(|| (!protocol.variant.is_empty()).then(|| protocol.variant.clone()))
                 .unwrap_or_else(|| "2022-blake3-aes-128-gcm".to_string());
-            let userinfo = base64_encode(format!("{method}:{password}").as_bytes());
+            let userinfo = base64_url_no_pad(format!("{method}:{password}").as_bytes());
             format!("ss://{}@{}:{}#{}", userinfo, host_part, protocol.port, label)
         }
         "vmess" => {

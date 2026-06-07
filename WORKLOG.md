@@ -83,6 +83,31 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 
 ## Log
 
+### 2026-06-07 (`v0.2.13`)
+
+- Implementation direction for `v0.2.13`:
+  - Fix subscription import compatibility, especially Clash/Mihomo output, so subscriptions contain real proxy nodes instead of placeholders.
+  - Make clipboard behavior reliable on HTTP panel origins by sharing one copy helper with a textarea fallback.
+  - Show generated node links and active subscription URLs immediately after protocol push, while Agent-reported links continue to refresh after remote apply.
+  - Normalize node region UI to one compact flag-plus-code label such as `🇭🇰 HK`.
+  - Keep newly created protocol credentials stable by storing generated UUID/password values in protocol settings.
+- Implementation completed before commit:
+  - Replaced Clash subscription placeholder output with URI parsing and YAML conversion for VMess, VLESS, Trojan, Shadowsocks, Hysteria2, Tuic, and AnyTLS links.
+  - Added API-side fallback link generation from stored node protocols when an online node has not yet reported links.
+  - Updated protocol creation responses to include generated node links and enabled subscription URLs.
+  - Added a shared frontend clipboard helper and replaced page-local clipboard calls in node and subscription pages.
+  - Added a protocol result modal to the node page and simplified region rendering in node tables/cards.
+  - Switched new Shadowsocks links to URL-safe Base64 userinfo in both API fallback generation and the Rust Agent.
+  - Bumped panel and Agent metadata to `0.2.13` / `0.2.13-rust`.
+- Local verification before commit:
+  - `node --check apps/api/src/main.mjs`: passed.
+  - `node --check apps/api/src/store.mjs`: passed.
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 16 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+
 ### 2026-06-07 (`v0.2.12`)
 
 - Implementation direction for `v0.2.12`:

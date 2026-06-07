@@ -20,10 +20,12 @@ import {
   updatePulseNode,
   type PulseNode,
   type PulseProtocolMeta,
+  type PulseSubscriptionUrl,
   type PulseTrafficEvent,
   type PulseTrafficHistoryItem,
   type PulseTrafficRankItem
 } from '@/service/api';
+import { copyText } from '@/utils/clipboard';
 import { compactRegion, formatBeijingTime, formatBytes, formatRate, regionBadge, regionFlag } from '@/utils/pulse-format';
 
 type ProtocolDraft = { type: string; port: number | null; listen: string; variant: string; settingsJson: string };
@@ -57,6 +59,10 @@ const trafficSocketState = ref<TrafficSocketState>('connecting');
 const singBoxDrafts = reactive<Record<string, { version: string; downloadUrl: string; sha256: string }>>({});
 const installDrawerVisible = ref(false);
 const installDrawerNode = ref<PulseNode | null>(null);
+const protocolResultVisible = ref(false);
+const protocolResultNode = ref<PulseNode | null>(null);
+const protocolResultLinks = ref<string[]>([]);
+const protocolResultSubscriptions = ref<PulseSubscriptionUrl[]>([]);
 let trafficSocket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let allowReconnect = true;
@@ -67,12 +73,9 @@ const columns = computed<DataTableColumns<PulseNode>>(() => [
   {
     title: '区域',
     key: 'region',
-    width: 170,
+    width: 118,
     render(row: PulseNode) {
-      return h('div', { class: 'region-cell' }, [
-        h('span', { class: 'region-icon' }, regionIconLabel(row)),
-        h('span', { class: 'region-name', title: displayNodeRegion(row) }, displayNodeRegion(row))
-      ]);
+      return h('span', { class: 'region-badge-text', title: displayNodeRegion(row) }, regionBadgeLabel(row));
     }
   },
   {
@@ -241,34 +244,6 @@ async function copyReportedLinks(node: PulseNode) {
   const copied = await copyText(node.reportedLinks.join('\n'));
   if (copied) window.$message?.success('已复制上报链接');
   else window.$message?.error('复制失败，请在命令记录中查看上报链接');
-}
-
-async function copyText(text: string) {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // Fall back to execCommand for non-secure origins and strict clipboard policies.
-  }
-  const textarea = document.createElement('textarea');
-  textarea.value = text;
-  textarea.setAttribute('readonly', 'true');
-  textarea.style.position = 'fixed';
-  textarea.style.left = '-9999px';
-  textarea.style.top = '0';
-  document.body.appendChild(textarea);
-  textarea.focus();
-  textarea.select();
-  let copied = false;
-  try {
-    copied = document.execCommand('copy');
-  } catch {
-    copied = false;
-  }
-  document.body.removeChild(textarea);
-  return copied;
 }
 
 function openInstallDrawer(node: PulseNode) {
@@ -459,7 +434,30 @@ async function addProtocol(node: PulseNode) {
   });
   node.protocols.push(result.protocol);
   draft.settingsJson = '';
+  protocolResultNode.value = node;
+  protocolResultLinks.value = result.links || [];
+  protocolResultSubscriptions.value = result.subscriptionUrls || [];
+  protocolResultVisible.value = true;
   window.$message?.success(`已添加并推送 ${result.protocol.name}`);
+}
+
+async function copyProtocolResultLinks() {
+  if (!protocolResultLinks.value.length) {
+    window.$message?.warning('当前没有可复制的节点链接');
+    return;
+  }
+  if (await copyText(protocolResultLinks.value.join('\n'))) window.$message?.success('节点链接已复制');
+  else window.$message?.error('复制失败，请手动选中链接');
+}
+
+async function copyProtocolResultSubscriptions() {
+  if (!protocolResultSubscriptions.value.length) {
+    window.$message?.warning('当前没有可复制的订阅 URL');
+    return;
+  }
+  const text = protocolResultSubscriptions.value.map(item => `${item.name} (${item.format}): ${item.publicUrl}`).join('\n');
+  if (await copyText(text)) window.$message?.success('订阅 URL 已复制');
+  else window.$message?.error('复制失败，请手动选中订阅 URL');
 }
 
 async function removeProtocol(node: PulseNode, protocolId: string) {
@@ -937,16 +935,15 @@ onUnmounted(() => {
           <div class="node-head">
             <div class="node-title-block">
               <div class="node-title-row">
-                <span class="region-icon">{{ regionIconLabel(node) }}</span>
+                <span class="region-badge-text">{{ regionBadgeLabel(node) }}</span>
                 <div class="node-title">{{ node.name }}</div>
               </div>
-              <div class="node-subtitle">{{ displayNodeRegion(node) }} · {{ ipModeLabel(node.network?.ipMode) }}</div>
+              <div class="node-subtitle">{{ ipModeLabel(node.network?.ipMode) }}</div>
             </div>
             <NTag :type="node.online ? 'success' : 'warning'" size="small" round>{{ node.online ? '在线' : node.agentStatus }}</NTag>
           </div>
 
           <div class="node-quickline">
-            <span>{{ regionBadgeLabel(node) }}</span>
             <span>协议 {{ node.protocols?.length || 0 }}</span>
             <span>上报 {{ formatBeijingTime(node.lastSeenAt) }}</span>
           </div>
@@ -1171,6 +1168,37 @@ onUnmounted(() => {
         </NSpace>
       </NDrawerContent>
     </NDrawer>
+
+    <NModal v-model:show="protocolResultVisible" preset="card" class="protocol-result-modal" :title="`${protocolResultNode?.name || '节点'} 订阅信息`">
+      <NSpace vertical :size="12">
+        <div class="result-note">
+          协议已写入面板并下发到 Agent。Agent 应用完成后，上报链接会自动刷新；下面是面板按当前协议生成的可导入链接。
+        </div>
+        <div>
+          <div class="result-section-title">节点链接</div>
+          <NInput
+            :value="protocolResultLinks.join('\n')"
+            readonly
+            type="textarea"
+            :autosize="{ minRows: 3, maxRows: 7 }"
+            placeholder="等待节点地址或协议信息"
+          />
+        </div>
+        <div>
+          <div class="result-section-title">订阅 URL</div>
+          <div class="subscription-url-list">
+            <div v-for="item in protocolResultSubscriptions" :key="item.id" class="subscription-url-row">
+              <span>{{ item.name }} · {{ item.format }}</span>
+              <strong :title="item.publicUrl">{{ item.publicUrl }}</strong>
+            </div>
+          </div>
+        </div>
+        <NSpace>
+          <NButton type="primary" @click="copyProtocolResultLinks">复制节点链接</NButton>
+          <NButton secondary @click="copyProtocolResultSubscriptions">复制订阅 URL</NButton>
+        </NSpace>
+      </NSpace>
+    </NModal>
   </NSpace>
 </template>
 
@@ -1188,6 +1216,19 @@ onUnmounted(() => {
   align-items: center;
   min-width: 0;
   gap: 6px;
+}
+
+.region-badge-text {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 4px;
+  min-width: 54px;
+  color: var(--n-text-color, #1f2937);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  white-space: nowrap;
 }
 
 .region-icon {
@@ -1585,6 +1626,66 @@ onUnmounted(() => {
   width: min(380px, calc(100vw - 48px));
 }
 
+:global(.protocol-result-modal) {
+  width: min(720px, calc(100vw - 32px));
+}
+
+.result-section-title {
+  margin-bottom: 6px;
+  color: var(--n-text-color, #1f2937);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+}
+
+.result-note {
+  padding: 8px 10px;
+  border: 1px solid rgba(5, 150, 105, 0.18);
+  border-radius: 6px;
+  background: rgba(5, 150, 105, 0.08);
+  color: #047857;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.subscription-url-list {
+  display: grid;
+  gap: 6px;
+}
+
+.subscription-url-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 140px) minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.07);
+}
+
+.subscription-url-row span,
+.subscription-url-row strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subscription-url-row span {
+  color: var(--n-text-color-disabled, #64748b);
+  font-weight: 650;
+}
+
+.subscription-url-row strong {
+  color: var(--n-text-color, #1f2937);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-weight: 600;
+}
+
 @media (max-width: 640px) {
   .toolbar-select,
   .history-node-select {
@@ -1607,6 +1708,10 @@ onUnmounted(() => {
   .traffic-limit {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .subscription-url-row {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

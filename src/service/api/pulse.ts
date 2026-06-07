@@ -195,6 +195,13 @@ export interface PulseNodeProtocol {
   updatedAt: string;
 }
 
+export interface PulseSubscriptionUrl {
+  id: string;
+  name: string;
+  format: PulseProfile['format'];
+  publicUrl: string;
+}
+
 export interface PulseDashboard {
   counts: {
     nodes: number;
@@ -437,7 +444,10 @@ export function createPulseNodeProtocol(
   nodeId: string,
   body: { type: string; port?: number | null; listen?: string; variant?: string; name?: string; settings?: Record<string, unknown> }
 ) {
-  return pulseFetch<{ protocol: PulseNodeProtocol; command: PulseCommand }>(`/nodes/${nodeId}/protocols`, { method: 'POST', body });
+  return pulseFetch<{ protocol: PulseNodeProtocol; command: PulseCommand; links: string[]; subscriptionUrls: PulseSubscriptionUrl[] }>(
+    `/nodes/${nodeId}/protocols`,
+    { method: 'POST', body }
+  );
 }
 
 export function deletePulseNodeProtocol(nodeId: string, protocolId: string) {
