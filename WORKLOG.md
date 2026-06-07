@@ -105,6 +105,22 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm build`: passed.
   - `git diff --check`: passed after cleaning generated router typing whitespace.
   - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+- Committed and pushed `9febdee Fix warp discovery and sing-box install`.
+- GitHub Actions and release:
+  - `main` panel image run `27089156615`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+  - Tag `v0.2.7`: panel image run `27089171737` completed successfully.
+  - Tag `v0.2.7`: Agent release run `27089171732` completed successfully and published release assets.
+  - Published Agent release assets: `pulsedeck-agent-v0.2.7-linux-x64.tar.gz` 418390 bytes, `pulsedeck-agent-v0.2.7-linux-arm64.tar.gz` 392011 bytes, `pulsedeck-agent-v0.2.7-linux-armv7l.tar.gz` 387041 bytes, and `SHA256SUMS` 323 bytes.
+- Deployment after `v0.2.7`:
+  - `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+  - `docker compose up -d`: recreated and started `pulsedeck-panel`.
+  - `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed with `version: 0.2.7` and `agentVersion: 0.2.7-rust`.
+  - `GET /api/v1/agents/runtime/manifest/linux-x64`: passed with `version: 0.2.7-rust`, `sizeBytes: 864832`, and SHA-256 `fc9aefa86381c815282b7f142a7537b8bc29d9c63d993425503d860360364d6e`.
+- Post-deploy smoke passed:
+  - Created and deleted a temporary WARP IPv4 plus native IPv6 node; verified region compaction, `ipMode: warp-v4-ipv6`, native IPv4 empty, native IPv6 preserved, and WARP IPv4/WARP IPv6 exposed separately.
+  - Verified the real `hk` node now presents a compact region label and keeps WARP IPv4 separate from native IPv4 in the panel.
+  - Queued `sing-box-install` with the new default version payload for the real `hk` node; command completed successfully and the node now reports sing-box installed under the Agent home binary path.
 
 - Implementation direction for this turn:
   - Complete priority modules 1/2/3 before moving to later optional modules.
