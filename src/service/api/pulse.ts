@@ -64,7 +64,7 @@ export interface PulseNode {
   agentStatus: string;
   subscriptionEnabled: boolean;
   lastSeenAt: string | null;
-  addresses: Array<{ interface: string; family: string; address: string; cidr?: string }>;
+  addresses: Array<{ interface: string; family: string; address: string; cidr?: string; region?: string; countryCode?: string; city?: string; source?: string }>;
   metrics: null | {
     cpu?: { usagePercent?: number | null; cores?: number | null; load?: { one?: number | null } };
     memory?: { usagePercent?: number | null; totalBytes?: number | null; availableBytes?: number | null };
@@ -92,7 +92,7 @@ export interface PulseNode {
     primaryIpv4: string | null;
     primaryIpv6: string | null;
     ipMode: string;
-    publicAddresses: Array<{ interface: string; family: string; address: string; cidr?: string }>;
+    publicAddresses: Array<{ interface: string; family: string; address: string; cidr?: string; region?: string; countryCode?: string; city?: string; source?: string }>;
     warpLikely: boolean;
     detectedRegion: string;
     regionSource: string;
@@ -107,6 +107,7 @@ export interface PulseNode {
     rxRateBytesPerSecond: number;
     txRateBytesPerSecond: number;
     thresholdBytes: number;
+    limitMode: 'total' | 'download' | 'upload';
     warningPercent: number;
     autoDisableSubscription: boolean;
     thresholdExceededAt: string | null;
@@ -159,6 +160,13 @@ export interface PulseDashboard {
   averages: {
     cpuUsagePercent: number | null;
     memoryUsagePercent: number | null;
+  };
+  traffic: {
+    totalRxBytes: number;
+    totalTxBytes: number;
+    totalBytes: number;
+    rxRateBytesPerSecond: number;
+    txRateBytesPerSecond: number;
   };
   recentNodes: PulseNode[];
   recentCommands: PulseCommand[];

@@ -17,7 +17,7 @@ const DEFAULT_GEOIP_FILE = path.join(ROOT_DIR, 'geoip.json');
 const DEFAULT_GEOSITE_FILE = path.join(ROOT_DIR, 'geosite.json');
 const PORT = Number(process.env.PULSEDECK_PORT || 14770);
 const HOST = process.env.PULSEDECK_HOST || '0.0.0.0';
-const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.4';
+const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.5';
 const AGENT_VERSION = process.env.PULSEDECK_AGENT_VERSION || `${APP_VERSION}-rust`;
 const AGENT_RUNTIME_TARGETS = ['linux-x64', 'linux-arm64', 'linux-armv7l'];
 const ADMIN_USER = process.env.PULSEDECK_ADMIN_USER || 'admin';
@@ -214,6 +214,7 @@ function dashboard(data) {
   const onlineNodes = data.nodes.filter((node) => isNodeOnline(node, data));
   const warningNodes = data.nodes.filter((node) => node.status === 'warning' || node.agentStatus === 'degraded');
   const queuedCommands = data.commands.filter((command) => ['queued', 'running'].includes(command.status));
+  const traffic = trafficSummary(data.nodes);
   const cpuValues = onlineNodes
     .map((node) => Number(node.metrics?.cpu?.usagePercent))
     .filter((value) => Number.isFinite(value));
@@ -234,6 +235,7 @@ function dashboard(data) {
       cpuUsagePercent: average(cpuValues),
       memoryUsagePercent: average(memoryValues)
     },
+    traffic,
     recentNodes: data.nodes
       .slice()
       .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
@@ -245,13 +247,64 @@ function dashboard(data) {
   };
 }
 
+function trafficSummary(nodes = []) {
+  return nodes.reduce(
+    (total, node) => {
+      const traffic = node.traffic || {};
+      total.totalRxBytes += Number(traffic.totalRxBytes) || 0;
+      total.totalTxBytes += Number(traffic.totalTxBytes) || 0;
+      total.totalBytes += Number(traffic.totalBytes) || 0;
+      total.rxRateBytesPerSecond += Number(traffic.rxRateBytesPerSecond) || 0;
+      total.txRateBytesPerSecond += Number(traffic.txRateBytesPerSecond) || 0;
+      return total;
+    },
+    {
+      totalRxBytes: 0,
+      totalTxBytes: 0,
+      totalBytes: 0,
+      rxRateBytesPerSecond: 0,
+      txRateBytesPerSecond: 0
+    }
+  );
+}
+
 function average(values) {
   if (values.length === 0) return null;
   return Math.round((values.reduce((sum, value) => sum + value, 0) / values.length) * 10) / 10;
 }
 
+function formatBeijingTime(value) {
+  if (!value) return '-';
+  const date = /^\d{10}$/.test(String(value)) ? new Date(Number(value) * 1000) : new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    hour12: false,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  })
+    .formatToParts(date)
+    .reduce((result, part) => {
+      if (part.type !== 'literal') result[part.type] = part.value;
+      return result;
+    }, {});
+  return `${parts.year}.${parts.month}.${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+}
+
 function clientAddress(req) {
-  const raw = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '')
+  const raw = String(
+    req.headers['cf-connecting-ip'] ||
+      req.headers['x-real-ip'] ||
+      req.headers['x-client-ip'] ||
+      req.headers['x-forwarded-for'] ||
+      req.socket.remoteAddress ||
+      ''
+  )
     .split(',')[0]
     .trim()
     .replace(/^::ffff:/, '');
@@ -267,7 +320,11 @@ function normalizeAddressItem(item) {
     interface: String(item.interface || item.name || item.iface || '').trim(),
     family,
     address,
-    cidr: item.cidr ? String(item.cidr).trim() : ''
+    cidr: item.cidr ? String(item.cidr).trim() : '',
+    region: String(item.region || item.regionName || '').trim(),
+    countryCode: String(item.countryCode || item.country || '').trim(),
+    city: String(item.city || '').trim(),
+    source: String(item.source || '').trim()
   };
 }
 
@@ -445,7 +502,16 @@ function analyzeAddresses(addresses = []) {
   else if (anyIpv6) ipMode = 'private-ipv6';
 
   const lookupIp = publicIpv4?.address || publicIpv6?.address || '';
-  const geo = lookupIp ? detectGeoRegion(lookupIp) : { region: '', countryCode: '', city: '', source: 'auto-pending' };
+  let geo = lookupIp ? detectGeoRegion(lookupIp) : { region: '', countryCode: '', city: '', source: 'auto-pending' };
+  const agentGeo = publicAddresses.find((item) => item.region || item.countryCode || item.city);
+  if (!geo.region && agentGeo) {
+    geo = {
+      region: agentRegionLabel(agentGeo),
+      countryCode: agentGeo.countryCode || '',
+      city: agentGeo.city || '',
+      source: agentGeo.source || 'agent-public-lookup'
+    };
+  }
   return {
     primaryIpv4,
     primaryIpv6,
@@ -456,6 +522,10 @@ function analyzeAddresses(addresses = []) {
     regionSource: geo.source,
     updatedAt: nowIso()
   };
+}
+
+function agentRegionLabel(item) {
+  return [item.countryCode, item.region, item.city].filter(Boolean).join(' · ') || item.region || item.countryCode || item.city || '';
 }
 
 function applyNetworkDiscovery(node, addresses) {
@@ -535,7 +605,7 @@ function deliveryPlan(data, channelName) {
     return {
       channel,
       status: ready ? 'pending' : 'skipped',
-      detail: ready ? 'Telegram channel configured' : 'Telegram channel is disabled or incomplete',
+      detail: ready ? 'Telegram 渠道已配置' : 'Telegram 渠道未启用或配置不完整',
       updatedAt: timestamp
     };
   }
@@ -545,14 +615,14 @@ function deliveryPlan(data, channelName) {
     return {
       channel,
       status: ready ? 'pending' : 'skipped',
-      detail: ready ? 'SMTP channel configured' : 'Email channel is disabled or incomplete',
+      detail: ready ? 'SMTP 渠道已配置' : '邮件渠道未启用或配置不完整',
       updatedAt: timestamp
     };
   }
   return {
     channel,
     status: 'skipped',
-    detail: 'Unknown notification channel',
+    detail: '未知通知渠道',
     updatedAt: timestamp
   };
 }
@@ -580,7 +650,7 @@ function refreshAlertStatus(event) {
 }
 
 function alertSubject(event) {
-  const level = event.level === 'critical' ? 'CRITICAL' : event.level === 'warning' ? 'WARNING' : 'INFO';
+  const level = event.level === 'critical' ? '严重' : event.level === 'warning' ? '警告' : '信息';
   return `[PulseDeck] ${level} ${event.type || 'alert'}`;
 }
 
@@ -590,7 +660,7 @@ function alertBody(event) {
     '',
     event.message || '',
     event.nodeId ? `Node: ${event.nodeId}` : '',
-    event.createdAt ? `Time: ${event.createdAt}` : ''
+    event.createdAt ? `时间: ${formatBeijingTime(event.createdAt)}` : ''
   ]
     .filter(Boolean)
     .join('\n');
@@ -799,7 +869,7 @@ function applyTrafficLimitAction(data, node, action) {
       {
         type: 'disable-node-subscription',
         status: changed ? 'completed' : 'skipped',
-        detail: changed ? 'Node subscription output disabled' : 'Node subscription output was already disabled',
+        detail: changed ? '节点订阅输出已禁用' : '节点订阅输出此前已禁用',
         updatedAt: timestamp
       }
     ];
@@ -818,13 +888,13 @@ function applyTrafficLimitAction(data, node, action) {
       {
         type: 'disable-node-subscription',
         status: 'completed',
-        detail: 'Node subscription output disabled',
+        detail: '节点订阅输出已禁用',
         updatedAt: timestamp
       },
       {
         type: 'disable-all-subscriptions',
         status: disabledProfiles.length ? 'completed' : 'skipped',
-        detail: disabledProfiles.length ? `Disabled ${disabledProfiles.length} subscription profiles` : 'All subscription profiles were already disabled',
+        detail: disabledProfiles.length ? `已禁用 ${disabledProfiles.length} 个订阅 Profile` : '所有订阅 Profile 此前已禁用',
         profileIds: disabledProfiles,
         updatedAt: timestamp
       }
@@ -834,7 +904,7 @@ function applyTrafficLimitAction(data, node, action) {
     {
       type: 'keep-node',
       status: 'skipped',
-      detail: 'Traffic limit action is disabled',
+      detail: '流量超限动作已关闭',
       updatedAt: timestamp
     }
   ];
@@ -862,21 +932,23 @@ function updateTrafficAccounting(data, node, metrics) {
   traffic.txRateBytesPerSecond = elapsedSeconds ? Math.round(deltaTx / elapsedSeconds) : 0;
   traffic.updatedAt = nowIso();
   const threshold = Number(traffic.thresholdBytes) || 0;
+  traffic.limitMode = trafficLimitMode(traffic.limitMode);
   node.alertState ||= {};
   const warningPercent = Math.min(Math.max(Number(traffic.warningPercent) || 80, 1), 100);
   const warningBytes = threshold > 0 ? Math.floor((threshold * warningPercent) / 100) : 0;
-  if (warningBytes > 0 && traffic.totalBytes >= warningBytes && !node.alertState.trafficWarningAlertedAt && !traffic.thresholdExceededAt) {
+  const usageBytes = trafficLimitUsage(traffic);
+  if (warningBytes > 0 && usageBytes >= warningBytes && !node.alertState.trafficWarningAlertedAt && !traffic.thresholdExceededAt) {
     node.alertState.trafficWarningAlertedAt = nowIso();
     addAlertEvent(data, {
       nodeId: node.id,
       type: 'traffic-warning',
       level: 'warning',
-      message: `Node ${node.name} reached ${warningPercent}% of traffic threshold`,
+      message: `节点 ${node.name} 已达到${trafficLimitModeLabel(traffic.limitMode)}流量阈值的 ${warningPercent}%`,
       channels: node.alertPolicy?.trafficChannels || data.alertPolicy?.trafficChannels || [],
       dedupeKey: `traffic-warning:${node.id}:${threshold}`
     });
   }
-  if (threshold > 0 && traffic.totalBytes >= threshold && !traffic.thresholdExceededAt) {
+  if (threshold > 0 && usageBytes >= threshold && !traffic.thresholdExceededAt) {
     traffic.thresholdExceededAt = nowIso();
     node.alertState.trafficThresholdAlertedAt = traffic.thresholdExceededAt;
     node.status = 'warning';
@@ -886,13 +958,28 @@ function updateTrafficAccounting(data, node, metrics) {
       nodeId: node.id,
       type: 'traffic-threshold',
       level: 'warning',
-      message: `Node ${node.name} exceeded traffic threshold`,
+      message: `节点 ${node.name} 已超过${trafficLimitModeLabel(traffic.limitMode)}流量阈值`,
       channels: node.alertPolicy?.trafficChannels || data.alertPolicy?.trafficChannels || [],
       actions,
       dedupeKey: `traffic-threshold:${node.id}:${threshold}`
     });
   }
   node.traffic = traffic;
+}
+
+function trafficLimitMode(value) {
+  return ['total', 'download', 'upload'].includes(value) ? value : 'total';
+}
+
+function trafficLimitUsage(traffic = {}) {
+  const mode = trafficLimitMode(traffic.limitMode);
+  if (mode === 'download') return Number(traffic.totalRxBytes) || 0;
+  if (mode === 'upload') return Number(traffic.totalTxBytes) || 0;
+  return Number(traffic.totalBytes) || 0;
+}
+
+function trafficLimitModeLabel(mode) {
+  return { total: '总量', download: '下载', upload: '上传' }[trafficLimitMode(mode)] || '总量';
 }
 
 function evaluateOfflineAlerts(data) {
@@ -920,7 +1007,7 @@ function evaluateOfflineAlerts(data) {
           nodeId: node.id,
           type: 'node-offline',
           level: 'critical',
-          message: `Node ${node.name} has been offline for more than ${Math.round(maxAgeMs / 1000)} seconds`,
+          message: `节点 ${node.name} 离线超过 ${Math.round(maxAgeMs / 1000)} 秒`,
           channels: node.alertPolicy?.offlineChannels || data.alertPolicy?.offlineChannels || [],
           dedupeKey: `node-offline:${node.id}:${node.alertState.offlineSince}`
         });
@@ -940,7 +1027,7 @@ function evaluateOfflineAlerts(data) {
         nodeId: node.id,
         type: 'node-recovered',
         level: 'info',
-        message: `Node ${node.name} is back online`,
+        message: `节点 ${node.name} 已恢复在线`,
         channels: node.alertPolicy?.offlineChannels || data.alertPolicy?.offlineChannels || [],
         resolvedAt: checkedAt,
         dedupeKey: `node-recovered:${node.id}:${checkedAt}`
@@ -1007,7 +1094,7 @@ function updateNodeFromAgent(data, node, agent, patch = {}) {
       nodeId: node.id,
       type: 'node-recovered',
       level: 'info',
-      message: `Node ${node.name} is back online`,
+      message: `节点 ${node.name} 已恢复在线`,
       channels: node.alertPolicy?.offlineChannels || data.alertPolicy?.offlineChannels || [],
       resolvedAt: timestamp,
       dedupeKey: `node-recovered:${node.id}:${timestamp}`
@@ -1080,7 +1167,7 @@ function createCommand(draft, nodeId, type, payload = {}) {
   appendCommandEvent(draft, command, {
     type: 'state',
     stream: 'state',
-    message: `queued ${type}`,
+    message: `已入队 ${type}`,
     payload: { status: 'queued', type }
   });
   return command;
@@ -1502,7 +1589,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
               type: 'state',
               stream: 'state',
               agentId,
-              message: `running ${command.type}`,
+              message: `执行中 ${command.type}`,
               payload: { status: 'running', type: command.type }
             });
           }
@@ -1549,7 +1636,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
           type: command.status === 'failed' ? 'error' : 'result',
           stream: command.status === 'failed' ? 'stderr' : 'result',
           agentId,
-          message: command.status === 'failed' ? commandResultMessage(command.result) : 'command succeeded',
+          message: command.status === 'failed' ? commandResultMessage(command.result) : '命令执行成功',
           payload: { status: command.status, result: command.result }
         });
         appendCommandEvent(draft, command, {
@@ -1632,6 +1719,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
         node.traffic = {
           ...(node.traffic || {}),
           ...(body.traffic.thresholdBytes !== undefined ? { thresholdBytes: Number(body.traffic.thresholdBytes) || 0 } : {}),
+          ...(body.traffic.limitMode !== undefined ? { limitMode: trafficLimitMode(body.traffic.limitMode) } : {}),
           ...(body.traffic.warningPercent !== undefined ? { warningPercent: Number(body.traffic.warningPercent) || 80 } : {}),
           ...(body.traffic.autoDisableSubscription !== undefined ? { autoDisableSubscription: body.traffic.autoDisableSubscription === true } : {})
         };

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { fetchPulseDashboard, openPulseTrafficSocket, type PulseDashboard, type PulseTrafficEvent } from '@/service/api';
+import { formatBeijingTime, formatBytes, formatRate } from '@/utils/pulse-format';
 
 type TrafficSocketState = 'connecting' | 'live' | 'reconnecting' | 'offline';
-type TrafficSample = { time: number; rx: number; tx: number; total: number };
+type TrafficSample = { time: number; rx: number; tx: number; totalRx: number; totalTx: number; total: number };
 
 const loading = ref(false);
 const dashboard = ref<PulseDashboard | null>(null);
@@ -14,7 +15,25 @@ let trafficSocket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let allowReconnect = true;
 
-const latestTraffic = computed(() => trafficHistory.samples[trafficHistory.samples.length - 1] || { time: 0, rx: 0, tx: 0, total: 0 });
+const dashboardTraffic = computed(() => dashboard.value?.traffic || {
+  totalRxBytes: 0,
+  totalTxBytes: 0,
+  totalBytes: 0,
+  rxRateBytesPerSecond: 0,
+  txRateBytesPerSecond: 0
+});
+
+const latestTraffic = computed(
+  () =>
+    trafficHistory.samples[trafficHistory.samples.length - 1] || {
+      time: 0,
+      rx: dashboardTraffic.value.rxRateBytesPerSecond,
+      tx: dashboardTraffic.value.txRateBytesPerSecond,
+      totalRx: dashboardTraffic.value.totalRxBytes,
+      totalTx: dashboardTraffic.value.totalTxBytes,
+      total: dashboardTraffic.value.totalBytes
+    }
+);
 
 async function loadData() {
   loading.value = true;
@@ -25,22 +44,9 @@ async function loadData() {
   }
 }
 
-function formatBytes(value?: number) {
-  const number = Number(value) || 0;
-  if (number >= 1024 ** 4) return `${(number / 1024 ** 4).toFixed(2)} TB`;
-  if (number >= 1024 ** 3) return `${(number / 1024 ** 3).toFixed(2)} GB`;
-  if (number >= 1024 ** 2) return `${(number / 1024 ** 2).toFixed(2)} MB`;
-  if (number >= 1024) return `${(number / 1024).toFixed(2)} KB`;
-  return `${number} B`;
-}
-
-function formatRate(value?: number) {
-  return `${formatBytes(value)}/s`;
-}
-
 function trafficPeak() {
   const peak = trafficHistory.samples.reduce((max, sample) => Math.max(max, sample.rx, sample.tx), 0);
-  return peak > 0 ? peak : 1;
+  return peak > 0 ? peak : Math.max(dashboardTraffic.value.rxRateBytesPerSecond, dashboardTraffic.value.txRateBytesPerSecond, 1);
 }
 
 function trafficPath(direction: 'rx' | 'tx') {
@@ -80,9 +86,11 @@ function applyTrafficEvent(event: PulseTrafficEvent) {
     (total, item) => ({
       rx: total.rx + (Number(item.traffic?.rxRateBytesPerSecond) || 0),
       tx: total.tx + (Number(item.traffic?.txRateBytesPerSecond) || 0),
+      totalRx: total.totalRx + (Number(item.traffic?.totalRxBytes) || 0),
+      totalTx: total.totalTx + (Number(item.traffic?.totalTxBytes) || 0),
       total: total.total + (Number(item.traffic?.totalBytes) || 0)
     }),
-    { rx: 0, tx: 0, total: 0 }
+    { rx: 0, tx: 0, totalRx: 0, totalTx: 0, total: 0 }
   );
   trafficHistory.samples.push({
     time: event.time ? Date.parse(event.time) || Date.now() : Date.now(),
@@ -91,6 +99,37 @@ function applyTrafficEvent(event: PulseTrafficEvent) {
   if (trafficHistory.samples.length > trafficHistoryLimit) {
     trafficHistory.samples.splice(0, trafficHistory.samples.length - trafficHistoryLimit);
   }
+}
+
+function displayRegion(node: PulseDashboard['recentNodes'][number]) {
+  return node.displayRegion || node.region || '等待 Agent 上报';
+}
+
+function commandLabel(type: string) {
+  const labels: Record<string, string> = {
+    probe: '探测',
+    diagnostics: '诊断',
+    'sing-box-render': '渲染配置',
+    'sing-box-apply': '应用配置',
+    'sing-box-restart': '重启 sing-box',
+    'sing-box-install': '安装 sing-box',
+    'sing-box-reinstall': '更新 sing-box',
+    'reset-links': '重置链接',
+    'protocol-add': '添加协议',
+    'protocol-delete': '删除协议'
+  };
+  return labels[type] || type;
+}
+
+function commandStatusLabel(status: string) {
+  return { queued: '等待 Agent', running: '执行中', succeeded: '成功', failed: '失败' }[status] || status;
+}
+
+function commandStatusType(status: string) {
+  if (status === 'succeeded') return 'success';
+  if (status === 'failed') return 'error';
+  if (status === 'running') return 'info';
+  return 'warning';
 }
 
 function scheduleTrafficReconnect() {
@@ -183,15 +222,23 @@ onUnmounted(() => {
           </template>
           <div class="traffic-summary">
             <div>
-              <span>下行</span>
+              <span>下载速率</span>
               <strong>{{ formatRate(latestTraffic.rx) }}</strong>
             </div>
             <div>
-              <span>上行</span>
+              <span>上传速率</span>
               <strong>{{ formatRate(latestTraffic.tx) }}</strong>
             </div>
             <div>
-              <span>累计</span>
+              <span>下载总量</span>
+              <strong>{{ formatBytes(latestTraffic.totalRx) }}</strong>
+            </div>
+            <div>
+              <span>上传总量</span>
+              <strong>{{ formatBytes(latestTraffic.totalTx) }}</strong>
+            </div>
+            <div>
+              <span>总流量</span>
               <strong>{{ formatBytes(latestTraffic.total) }}</strong>
             </div>
             <div>
@@ -216,10 +263,10 @@ onUnmounted(() => {
             <div v-for="node in dashboard.recentNodes" :key="node.id" class="operation-row">
               <div>
                 <div class="font-medium">{{ node.name }}</div>
-                <div class="text-12px text-gray-500">{{ node.region || '未设置区域' }} · {{ node.lastSeenAt || '未上报' }}</div>
+                <div class="text-12px text-gray-500">{{ displayRegion(node) }} · {{ formatBeijingTime(node.lastSeenAt) }}</div>
               </div>
               <NTag :type="node.lastSeenAt ? 'success' : 'warning'" size="small">
-                {{ node.agentStatus }}
+                {{ node.online ? '在线' : node.agentStatus }}
               </NTag>
             </div>
           </NSpace>
@@ -231,10 +278,10 @@ onUnmounted(() => {
           <NSpace v-else vertical>
             <div v-for="command in dashboard.recentCommands" :key="command.id" class="operation-row">
               <div>
-                <div class="font-medium">{{ command.type }}</div>
-                <div class="text-12px text-gray-500">{{ command.updatedAt }}</div>
+                <div class="font-medium">{{ commandLabel(command.type) }}</div>
+                <div class="text-12px text-gray-500">{{ formatBeijingTime(command.updatedAt) }}</div>
               </div>
-              <NTag size="small">{{ command.status }}</NTag>
+              <NTag size="small" :type="commandStatusType(command.status)">{{ commandStatusLabel(command.status) }}</NTag>
             </div>
           </NSpace>
         </NCard>
@@ -254,7 +301,7 @@ onUnmounted(() => {
 
 .traffic-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 10px;
 }

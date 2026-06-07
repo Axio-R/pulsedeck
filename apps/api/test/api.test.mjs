@@ -93,8 +93,8 @@ test('health reports PulseDeck on default product port', async () => {
     const { res, body } = await request(app.base, '/api/v1/health');
     assert.equal(res.status, 200);
     assert.equal(body.name, 'PulseDeck');
-    assert.equal(body.version, '0.2.4');
-    assert.equal(body.agentVersion, '0.2.4-rust');
+    assert.equal(body.version, '0.2.5');
+    assert.equal(body.agentVersion, '0.2.5-rust');
     assert.equal(body.port, 14770);
   } finally {
     await app.close();
@@ -106,7 +106,7 @@ test('agent runtime manifest exposes target metadata', async () => {
   try {
     const { res, body } = await request(app.base, '/api/v1/agents/runtime/manifest');
     assert.equal(res.status, 200);
-    assert.equal(body.agentVersion, '0.2.4-rust');
+    assert.equal(body.agentVersion, '0.2.5-rust');
     assert.ok(Array.isArray(body.targets));
     assert.deepEqual(
       body.targets.map((target) => target.target),
@@ -121,7 +121,7 @@ test('agent runtime manifest exposes target metadata', async () => {
     const single = await request(app.base, '/api/v1/agents/runtime/manifest/linux-x64');
     assert.equal(single.res.status, 200);
     assert.equal(single.body.target, 'linux-x64');
-    assert.equal(single.body.version, '0.2.4-rust');
+    assert.equal(single.body.version, '0.2.5-rust');
   } finally {
     await app.close();
   }
@@ -161,14 +161,14 @@ test('node enrollment install script is LXC and Rust multi-arch aware', async ()
     assert.match(script.body, /mv -f "\$next" "\$target"/);
     assert.match(script.body, /runtime\/manifest\/\$PULSEDECK_AGENT_TARGET/);
     assert.match(script.body, /verify_sha256/);
-    assert.match(script.body, /Agent checksum verified/);
+    assert.match(script.body, /Agent 校验通过/);
     assert.doesNotMatch(script.body, /download "\$PULSEDECK_BASE_URL\/api\/v1\/agents\/runtime\/\$PULSEDECK_AGENT_TARGET" "\$AGENT_BIN"/);
     assert.match(script.body, /systemd/);
     assert.match(script.body, /systemctl restart pulsedeck-agent\.service/);
     assert.match(script.body, /openrc/);
     assert.match(script.body, /rc-service pulsedeck-agent restart/);
     assert.match(script.body, /PK/);
-    assert.match(script.body, /Run `pk` without arguments|Use: pk, pk status/);
+    assert.match(script.body, /常用命令：pk|Use: pk, pk status/);
     assert.match(script.body, /pk info/);
     assert.match(script.body, /pk update-check/);
     assert.match(script.body, /RK/);
@@ -337,6 +337,39 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.equal(discovered.network.regionSource, 'geoip-empty');
     assert.equal(discovered.displayRegion, 'GeoIP 未配置');
 
+    const agentGeoNode = await request(app.base, '/api/v1/nodes', {
+      method: 'POST',
+      headers: auth,
+      body: { name: 'agent-geo-node' }
+    });
+    assert.equal(agentGeoNode.res.status, 201);
+    await request(app.base, `/api/v1/agents/enroll/${agentGeoNode.body.installId}`, {
+      method: 'POST',
+      body: {
+        version: '0.2.5-rust',
+        platform: 'linux',
+        arch: 'x86_64',
+        installDir: '/var/lib/pulsedeck',
+        serviceMode: 'manual',
+        addresses: [
+          {
+            interface: 'public-lookup',
+            family: 'ipv4',
+            address: '198.51.100.20',
+            region: 'California',
+            countryCode: 'US',
+            city: 'Los Angeles',
+            source: 'agent-public-lookup'
+          }
+        ]
+      }
+    });
+    const listedWithAgentGeo = await request(app.base, '/api/v1/nodes', { headers: auth });
+    const agentGeoDiscovered = listedWithAgentGeo.body.items.find((node) => node.id === agentGeoNode.body.id);
+    assert.equal(agentGeoDiscovered.region, 'US · California · Los Angeles');
+    assert.equal(agentGeoDiscovered.displayRegion, 'US · California · Los Angeles');
+    assert.equal(agentGeoDiscovered.network.regionSource, 'agent-public-lookup');
+
     const patched = await request(app.base, `/api/v1/nodes/${created.body.id}`, {
       method: 'PATCH',
       headers: auth,
@@ -381,8 +414,8 @@ test('nodes support automatic network discovery, protocol commands, and link res
 
     const eventsBeforeResult = await request(app.base, `/api/v1/commands/${protocolCommand.id}/events?format=json`, { headers: auth });
     assert.equal(eventsBeforeResult.res.status, 200);
-    assert.ok(eventsBeforeResult.body.items.some((event) => event.message.includes('queued')));
-    assert.ok(eventsBeforeResult.body.items.some((event) => event.message.includes('running')));
+    assert.ok(eventsBeforeResult.body.items.some((event) => event.message.includes('已入队')));
+    assert.ok(eventsBeforeResult.body.items.some((event) => event.message.includes('执行中')));
     assert.ok(eventsBeforeResult.body.items.some((event) => event.message === 'rendering sing-box config'));
 
     const commandResult = await request(app.base, `/api/v1/agents/${agentEnroll.body.agentId}/commands/${protocolCommand.id}/result`, {
@@ -435,14 +468,14 @@ test('nodes support automatic network discovery, protocol commands, and link res
         result: {
           finishedAt: '2',
           data: {
-            message: 'sing-box binary was not found; run sing-box-install or install sing-box manually'
+            message: '未找到 sing-box 可执行文件；请先下发 sing-box 安装命令或手动安装'
           }
         }
       }
     });
     assert.equal(failedResult.res.status, 200);
     const failedEvents = await request(app.base, `/api/v1/commands/${resetCommand.id}/events?format=json`, { headers: auth });
-    assert.ok(failedEvents.body.items.some((event) => event.type === 'error' && event.message.includes('sing-box binary was not found')));
+    assert.ok(failedEvents.body.items.some((event) => event.type === 'error' && event.message.includes('未找到 sing-box 可执行文件')));
 
     const removed = await request(app.base, `/api/v1/nodes/${created.body.id}/protocols/${added.body.protocol.id}`, {
       method: 'DELETE',
@@ -536,8 +569,113 @@ test('traffic websocket streams live node traffic snapshots', async () => {
     assert.equal(secondNode.traffic.lastDeltaTxBytes, 2500);
     assert.equal(secondNode.traffic.rxRateBytesPerSecond, 1500);
     assert.equal(secondNode.traffic.txRateBytesPerSecond, 2500);
+
+    const dashboard = await request(app.base, '/api/v1/dashboard', { headers: auth });
+    assert.equal(dashboard.res.status, 200);
+    assert.equal(dashboard.body.traffic.totalRxBytes, 1500);
+    assert.equal(dashboard.body.traffic.totalTxBytes, 2500);
+    assert.equal(dashboard.body.traffic.totalBytes, 4000);
+    assert.equal(dashboard.body.traffic.rxRateBytesPerSecond, 1500);
+    assert.equal(dashboard.body.traffic.txRateBytesPerSecond, 2500);
   } finally {
     ws?.close();
+    await app.close();
+  }
+});
+
+test('traffic limit policy can use download or upload accounting mode', async () => {
+  const app = await startServer();
+  try {
+    const login = await request(app.base, '/api/v1/auth/login', {
+      method: 'POST',
+      body: { username: 'admin', password: 'change-me' }
+    });
+    const auth = { authorization: `Bearer ${login.body.token}` };
+
+    const created = await request(app.base, '/api/v1/nodes', {
+      method: 'POST',
+      headers: auth,
+      body: {
+        name: 'traffic-mode-node',
+        traffic: {
+          thresholdBytes: 1000,
+          limitMode: 'download',
+          warningPercent: 100,
+          autoDisableSubscription: true
+        }
+      }
+    });
+    assert.equal(created.res.status, 201);
+    assert.equal(created.body.traffic.limitMode, 'download');
+
+    const enrolled = await request(app.base, `/api/v1/agents/enroll/${created.body.installId}`, {
+      method: 'POST',
+      body: {
+        version: '0.2.5-rust',
+        platform: 'linux',
+        arch: 'x86_64',
+        serviceMode: 'manual'
+      }
+    });
+    const agentAuth = { authorization: `Bearer ${enrolled.body.token}` };
+
+    await request(app.base, `/api/v1/agents/${enrolled.body.agentId}/metrics`, {
+      method: 'POST',
+      headers: agentAuth,
+      body: {
+        metrics: {
+          network: { interfaces: [{ name: 'eth0', rxBytes: 100, txBytes: 100 }] }
+        }
+      }
+    });
+    await request(app.base, `/api/v1/agents/${enrolled.body.agentId}/metrics`, {
+      method: 'POST',
+      headers: agentAuth,
+      body: {
+        metrics: {
+          network: { interfaces: [{ name: 'eth0', rxBytes: 700, txBytes: 2100 }] }
+        }
+      }
+    });
+
+    let nodes = await request(app.base, '/api/v1/nodes', { headers: auth });
+    let trafficNode = nodes.body.items.find((node) => node.id === created.body.id);
+    assert.equal(trafficNode.traffic.totalRxBytes, 600);
+    assert.equal(trafficNode.traffic.totalTxBytes, 2000);
+    assert.equal(trafficNode.traffic.thresholdExceededAt, null);
+    assert.equal(trafficNode.subscriptionEnabled, true);
+
+    let events = await request(app.base, '/api/v1/alert-events', { headers: auth });
+    assert.equal(events.body.items.some((event) => event.nodeId === created.body.id && event.type === 'traffic-threshold'), false);
+
+    const patched = await request(app.base, `/api/v1/nodes/${created.body.id}`, {
+      method: 'PATCH',
+      headers: auth,
+      body: { traffic: { limitMode: 'upload' } }
+    });
+    assert.equal(patched.res.status, 200);
+    assert.equal(patched.body.traffic.limitMode, 'upload');
+
+    await request(app.base, `/api/v1/agents/${enrolled.body.agentId}/metrics`, {
+      method: 'POST',
+      headers: agentAuth,
+      body: {
+        metrics: {
+          network: { interfaces: [{ name: 'eth0', rxBytes: 701, txBytes: 2101 }] }
+        }
+      }
+    });
+
+    nodes = await request(app.base, '/api/v1/nodes', { headers: auth });
+    trafficNode = nodes.body.items.find((node) => node.id === created.body.id);
+    assert.equal(trafficNode.traffic.thresholdExceededAt !== null, true);
+    assert.equal(trafficNode.subscriptionEnabled, false);
+
+    events = await request(app.base, '/api/v1/alert-events', { headers: auth });
+    const thresholdEvent = events.body.items.find((event) => event.nodeId === created.body.id && event.type === 'traffic-threshold');
+    assert.ok(thresholdEvent);
+    assert.match(thresholdEvent.message, /上传流量阈值/);
+  } finally {
     await app.close();
   }
 });

@@ -17,9 +17,16 @@ import {
   type PulseTrafficEvent,
   type PulseTrafficNode
 } from '@/service/api';
+import { formatBeijingTime, formatBytes, formatRate } from '@/utils/pulse-format';
 
 type ProtocolDraft = { type: string; port: number | null; listen: string; variant: string; settingsJson: string };
-type TrafficDraft = { thresholdGb: number | null; warningPercent: number; autoDisableSubscription: boolean; subscriptionEnabled: boolean };
+type TrafficDraft = {
+  thresholdGb: number | null;
+  limitMode: 'total' | 'download' | 'upload';
+  warningPercent: number;
+  autoDisableSubscription: boolean;
+  subscriptionEnabled: boolean;
+};
 type TrafficSample = { time: number; rx: number; tx: number };
 type TrafficSocketState = 'connecting' | 'live' | 'reconnecting' | 'offline';
 
@@ -46,7 +53,7 @@ const columns = computed(() => [
     key: 'region',
     width: 130,
     render(row: PulseNode) {
-      return row.displayRegion || row.region || '自动识别中';
+      return displayNodeRegion(row);
     }
   },
   {
@@ -93,7 +100,14 @@ const columns = computed(() => [
       return row.metrics?.memory?.usagePercent == null ? '-' : `${row.metrics.memory.usagePercent}%`;
     }
   },
-  { title: '最后上报', key: 'lastSeenAt', minWidth: 180 },
+  {
+    title: '最后上报',
+    key: 'lastSeenAt',
+    minWidth: 180,
+    render(row: PulseNode) {
+      return formatBeijingTime(row.lastSeenAt);
+    }
+  },
   {
     title: '操作',
     key: 'actions',
@@ -266,7 +280,7 @@ function draftFor(node: PulseNode) {
 
 function protocolOptions() {
   return protocolMetas.value.map(item => ({
-    label: `${item.name} · 默认 :${item.defaultPort}`,
+    label: item.name,
     value: item.type
   }));
 }
@@ -326,6 +340,7 @@ function trafficDraftFor(node: PulseNode) {
     const thresholdBytes = Number(node.traffic?.thresholdBytes) || 0;
     trafficDrafts[node.id] = {
       thresholdGb: thresholdBytes > 0 ? Number((thresholdBytes / 1024 ** 3).toFixed(2)) : null,
+      limitMode: node.traffic?.limitMode || 'total',
       warningPercent: Number(node.traffic?.warningPercent) || 80,
       autoDisableSubscription: node.traffic?.autoDisableSubscription === true,
       subscriptionEnabled: node.subscriptionEnabled === true
@@ -341,6 +356,7 @@ async function saveTrafficPolicy(node: PulseNode) {
     subscriptionEnabled: draft.subscriptionEnabled,
     traffic: {
       thresholdBytes: thresholdGb > 0 ? Math.round(thresholdGb * 1024 ** 3) : 0,
+      limitMode: draft.limitMode,
       warningPercent: draft.warningPercent,
       autoDisableSubscription: draft.autoDisableSubscription
     }
@@ -362,19 +378,6 @@ function ipModeLabel(value?: string) {
     'private-ipv6': '内网 IPv6'
   };
   return labels[value || ''] || '待识别';
-}
-
-function formatBytes(value?: number) {
-  const number = Number(value) || 0;
-  if (number >= 1024 ** 4) return `${(number / 1024 ** 4).toFixed(2)} TB`;
-  if (number >= 1024 ** 3) return `${(number / 1024 ** 3).toFixed(2)} GB`;
-  if (number >= 1024 ** 2) return `${(number / 1024 ** 2).toFixed(2)} MB`;
-  if (number >= 1024) return `${(number / 1024).toFixed(2)} KB`;
-  return `${number} B`;
-}
-
-function formatRate(value?: number) {
-  return `${formatBytes(value)}/s`;
 }
 
 function displayNodeRegion(node: PulseNode) {
@@ -472,13 +475,32 @@ function latestTrafficRate(node: PulseNode, direction: 'rx' | 'tx') {
 function trafficUsagePercent(node: PulseNode) {
   const threshold = Number(node.traffic?.thresholdBytes) || 0;
   if (threshold <= 0) return 0;
-  return Math.min(100, Math.round(((Number(node.traffic?.totalBytes) || 0) / threshold) * 1000) / 10);
+  return Math.min(100, Math.round((trafficLimitValue(node) / threshold) * 1000) / 10);
 }
 
 function trafficUsageLabel(node: PulseNode) {
   const threshold = Number(node.traffic?.thresholdBytes) || 0;
   if (threshold <= 0) return '未设置阈值';
-  return `${trafficUsagePercent(node)}% / ${formatBytes(threshold)}`;
+  return `${trafficLimitModeLabel(node.traffic?.limitMode)} ${trafficUsagePercent(node)}% / ${formatBytes(threshold)}`;
+}
+
+function trafficLimitValue(node: PulseNode) {
+  const mode = node.traffic?.limitMode || 'total';
+  if (mode === 'download') return Number(node.traffic?.totalRxBytes) || 0;
+  if (mode === 'upload') return Number(node.traffic?.totalTxBytes) || 0;
+  return Number(node.traffic?.totalBytes) || 0;
+}
+
+function trafficLimitModeLabel(mode?: string) {
+  return { total: '总量', download: '下载', upload: '上传' }[mode || 'total'] || '总量';
+}
+
+function trafficLimitModeOptions() {
+  return [
+    { label: '总量', value: 'total' },
+    { label: '下载', value: 'download' },
+    { label: '上传', value: 'upload' }
+  ];
 }
 
 function trafficSocketTagType() {
@@ -621,23 +643,39 @@ onUnmounted(() => {
             </div>
             <div class="metric-item">
               <span>CPU</span>
-              <strong>{{ node.metrics?.cpu?.usagePercent ?? '-' }}%</strong>
+              <strong>{{ node.metrics?.cpu?.usagePercent == null ? '-' : `${node.metrics.cpu.usagePercent}%` }}</strong>
             </div>
             <div class="metric-item">
               <span>内存</span>
-              <strong>{{ node.metrics?.memory?.usagePercent ?? '-' }}%</strong>
+              <strong>{{ node.metrics?.memory?.usagePercent == null ? '-' : `${node.metrics.memory.usagePercent}%` }}</strong>
             </div>
             <div class="metric-item">
-              <span>速率</span>
-              <strong>{{ formatRate(node.traffic?.rxRateBytesPerSecond) }} / {{ formatRate(node.traffic?.txRateBytesPerSecond) }}</strong>
+              <span>下载速率</span>
+              <strong>{{ formatRate(node.traffic?.rxRateBytesPerSecond) }}</strong>
             </div>
             <div class="metric-item">
-              <span>流量</span>
+              <span>上传速率</span>
+              <strong>{{ formatRate(node.traffic?.txRateBytesPerSecond) }}</strong>
+            </div>
+            <div class="metric-item">
+              <span>下载总量</span>
+              <strong>{{ formatBytes(node.traffic?.totalRxBytes) }}</strong>
+            </div>
+            <div class="metric-item">
+              <span>上传总量</span>
+              <strong>{{ formatBytes(node.traffic?.totalTxBytes) }}</strong>
+            </div>
+            <div class="metric-item">
+              <span>总流量</span>
               <strong>{{ formatBytes(node.traffic?.totalBytes) }}</strong>
             </div>
             <div class="metric-item">
               <span>订阅</span>
               <strong>{{ node.subscriptionEnabled ? '启用' : '停用' }}</strong>
+            </div>
+            <div class="metric-item">
+              <span>最后上报</span>
+              <strong>{{ formatBeijingTime(node.lastSeenAt) }}</strong>
             </div>
           </div>
 
@@ -648,8 +686,8 @@ onUnmounted(() => {
                 <div class="traffic-subtitle">峰值 {{ formatRate(trafficPeak(node)) }} · {{ trafficSamples(node).length }} 个样本</div>
               </div>
               <div class="traffic-rates">
-                <span class="rx">下行 {{ formatRate(latestTrafficRate(node, 'rx')) }}</span>
-                <span class="tx">上行 {{ formatRate(latestTrafficRate(node, 'tx')) }}</span>
+                <span class="rx">下载 {{ formatRate(latestTrafficRate(node, 'rx')) }}</span>
+                <span class="tx">上传 {{ formatRate(latestTrafficRate(node, 'tx')) }}</span>
               </div>
             </div>
             <div class="traffic-chart">
@@ -763,7 +801,10 @@ onUnmounted(() => {
                 class="w-full"
               />
             </NGi>
-            <NGi span="12 s:6">
+            <NGi span="12 s:4">
+              <NSelect v-model:value="trafficDraftFor(node).limitMode" size="small" :options="trafficLimitModeOptions()" />
+            </NGi>
+            <NGi span="12 s:4">
               <NInputNumber
                 v-model:value="trafficDraftFor(node).warningPercent"
                 size="small"

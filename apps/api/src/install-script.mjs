@@ -106,14 +106,14 @@ verify_sha256() {
   [ -n "$expected" ] || return 0
   actual="$(file_sha256 "$file" 2>/dev/null || true)"
   if [ -z "$actual" ]; then
-    say "No SHA-256 tool found; skipping Agent checksum verification."
+    say "未找到 SHA-256 工具，跳过 Agent 校验。"
     return 0
   fi
   if [ "$actual" != "$expected" ]; then
-    say "Agent checksum mismatch: expected $expected, got $actual."
+    say "Agent 校验失败：期望 $expected，实际 $actual。"
     return 1
   fi
-  say "Agent checksum verified: $actual"
+  say "Agent 校验通过：$actual"
   return 0
 }
 
@@ -238,11 +238,11 @@ EOF
 BASE_DIR="$(choose_base_dir)"
 TMP_DIR="$(choose_tmp_dir "$BASE_DIR")"
 PULSEDECK_AGENT_TARGET="$(agent_target)"
-[ "$PULSEDECK_AGENT_TARGET" != "unsupported" ] || die "Unsupported CPU architecture: $(uname -m 2>/dev/null || printf unknown). PulseDeck Rust Agent supports linux-x64, linux-arm64, and linux-armv7l when binaries are published."
+[ "$PULSEDECK_AGENT_TARGET" != "unsupported" ] || die "不支持的 CPU 架构：$(uname -m 2>/dev/null || printf unknown)。PulseDeck Rust Agent 发布包支持 linux-x64、linux-arm64 和 linux-armv7l。"
 
-say "Using Agent install directory: $BASE_DIR"
-say "Using Agent temp directory: $TMP_DIR"
-say "Using Agent target: $PULSEDECK_AGENT_TARGET"
+say "Agent 安装目录：$BASE_DIR"
+say "Agent 临时目录：$TMP_DIR"
+say "Agent 目标包：$PULSEDECK_AGENT_TARGET"
 
 MANIFEST_JSON="$(download_text "$PULSEDECK_BASE_URL/api/v1/agents/runtime/manifest/$PULSEDECK_AGENT_TARGET" 2>/dev/null || true)"
 RUNTIME_VERSION="$(printf '%s\\n' "$MANIFEST_JSON" | json_string version)"
@@ -253,18 +253,18 @@ if [ -n "$RUNTIME_VERSION" ] || [ -n "$RUNTIME_SIZE_BYTES" ]; then
   display_size="$RUNTIME_SIZE_BYTES"
   [ -n "$display_version" ] || display_version=unknown
   [ -n "$display_size" ] || display_size=unknown
-  say "Agent runtime metadata: version $display_version, size $display_size bytes"
+  say "Agent 运行时信息：版本 $display_version，大小 $display_size bytes"
 fi
 
-mkdir -p "$BASE_DIR/bin" "$BASE_DIR/state" || die "Cannot create Agent directories."
+mkdir -p "$BASE_DIR/bin" "$BASE_DIR/state" || die "无法创建 Agent 目录。"
 AGENT_BIN="$BASE_DIR/bin/pulsedeck-agent"
-install_agent_binary "$PULSEDECK_BASE_URL/api/v1/agents/runtime/$PULSEDECK_AGENT_TARGET" "$AGENT_BIN" "$RUNTIME_SHA256" || die "Cannot download and install PulseDeck Rust Agent binary for $PULSEDECK_AGENT_TARGET."
+install_agent_binary "$PULSEDECK_BASE_URL/api/v1/agents/runtime/$PULSEDECK_AGENT_TARGET" "$AGENT_BIN" "$RUNTIME_SHA256" || die "无法下载并安装 $PULSEDECK_AGENT_TARGET 的 PulseDeck Rust Agent。"
 
 if try_mkdir /etc/pulsedeck; then
   CONFIG_DIR=/etc/pulsedeck
 else
   CONFIG_DIR="$BASE_DIR/etc"
-  mkdir -p "$CONFIG_DIR" || die "Cannot create config directory."
+  mkdir -p "$CONFIG_DIR" || die "无法创建配置目录。"
 fi
 CONFIG_FILE="$CONFIG_DIR/agent.json"
 
@@ -302,9 +302,9 @@ EOF
 
 "$AGENT_BIN" once >/dev/null 2>&1 || true
 
-say "PulseDeck Rust Agent installed for $PULSEDECK_BASE_URL with install ID $PULSEDECK_INSTALL_ID."
-say "Service mode: $SERVICE_MODE"
-say "Shortcuts: $PK_PATH, $pk_path, $RK_PATH, $rk_path"
-say "Use: pk, pk status, pk info, pk service-status, pk update-check, pk update, pk uninstall --yes"
+say "PulseDeck Rust Agent 已安装：面板 $PULSEDECK_BASE_URL，安装 ID $PULSEDECK_INSTALL_ID。"
+say "服务模式：$SERVICE_MODE"
+say "快捷命令：$PK_PATH, $pk_path, $RK_PATH, $rk_path"
+say "常用命令：pk, pk status, pk info, pk service-status, pk update-check, pk update, pk uninstall --yes"
 `;
 }

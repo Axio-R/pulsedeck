@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const VERSION: &str = "0.2.4-rust";
+const VERSION: &str = "0.2.5-rust";
 
 #[derive(Clone, Debug)]
 struct Config {
@@ -80,6 +80,16 @@ struct RuntimeManifest {
     download_url: String,
 }
 
+#[derive(Clone, Debug, Default)]
+struct PublicGeo {
+    ip: String,
+    region: String,
+    country_code: String,
+    city: String,
+    source: String,
+    cached_at: u64,
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("{error}");
@@ -129,8 +139,8 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         "help" | "-h" | "--help" => {
-            println!("Usage: pk [status|info|menu|once|logs|doctor|install-service|service-status|stop|restart|update-check|update|uninstall|config|version]");
-            println!("Run `pk` without arguments to open the interactive menu.");
+            println!("用法：pk [status|info|menu|once|logs|doctor|install-service|service-status|stop|restart|update-check|update|uninstall|config|version]");
+            println!("直接运行 `pk` 会打开交互菜单。");
             Ok(())
         }
         _ => menu(),
@@ -139,10 +149,10 @@ fn run() -> Result<(), String> {
 
 fn run_daemon() -> Result<(), String> {
     let config = load_config()?;
-    log_line(&config, &format!("PulseDeck Rust Agent {VERSION} starting"));
+    log_line(&config, &format!("PulseDeck Rust Agent {VERSION} 启动"));
     loop {
         if let Err(error) = run_once(&config) {
-            log_line(&config, &format!("probe cycle failed: {error}"));
+            log_line(&config, &format!("探测周期失败：{error}"));
         }
         thread::sleep(Duration::from_millis(config.interval_ms.max(5_000)));
     }
@@ -191,7 +201,7 @@ fn run_once(config: &Config) -> Result<State, String> {
 
     state.last_seen_at = now_string();
     save_state(&config.state_file, &state)?;
-    log_line(config, "probe cycle completed");
+    log_line(config, "探测周期完成");
     Ok(state)
 }
 
@@ -216,7 +226,7 @@ fn enroll(config: &Config, mut state: State) -> Result<State, String> {
     state.token = json_get_string(&response, "token").unwrap_or_default();
     state.node_name = json_get_string(&response, "name").unwrap_or_default();
     if state.agent_id.is_empty() || state.token.is_empty() {
-        return Err("panel enrollment response did not include agentId/token".to_string());
+        return Err("面板注册响应缺少 agentId/token".to_string());
     }
     if state.enrolled_at.is_empty() {
         state.enrolled_at = now_string();
@@ -238,14 +248,14 @@ fn poll_commands(config: &Config, state: &State) -> Result<(), String> {
             &agent_command,
             "state",
             "state",
-            &format!("started {}", agent_command.kind),
+            &format!("开始执行 {}", agent_command.kind),
             "{}",
         );
         let (status, result) = execute_agent_command(config, state, &agent_command);
         let event_message = if status == "failed" {
-            result_message(&result).unwrap_or_else(|| "command failed".to_string())
+            result_message(&result).unwrap_or_else(|| "命令执行失败".to_string())
         } else {
-            "command finished; uploading result".to_string()
+            "命令已完成，正在上报结果".to_string()
         };
         let _ = post_command_event(
             config,
@@ -279,14 +289,14 @@ fn execute_agent_command(config: &Config, state: &State, agent_command: &AgentCo
     let outcome = match agent_command.kind.as_str() {
         "diagnostics" => Ok(collect_diagnostics_json(config)),
         "metrics" | "probe" => Ok(collect_metrics_json()),
-        "restart" => restart().map(|_| "{\"message\":\"restart requested by Rust Agent\"}".to_string()),
+        "restart" => restart().map(|_| "{\"message\":\"Agent 已请求重启\"}".to_string()),
         "reset-links" | "protocol-add" | "protocol-delete" => render_and_apply_sing_box(config, state, agent_command),
         "sing-box-install" => install_or_update_sing_box(config, agent_command, false),
         "sing-box-reinstall" => install_or_update_sing_box(config, agent_command, true),
         "sing-box-render" => render_sing_box_result(config, state, agent_command),
         "sing-box-apply" => render_and_apply_sing_box(config, state, agent_command),
         "sing-box-restart" => restart_sing_box_result(config),
-        _ => Ok(format!("{{\"message\":\"unknown command {}\"}}", json_escape(&agent_command.kind))),
+        _ => Ok(format!("{{\"message\":\"未知命令 {}\"}}", json_escape(&agent_command.kind))),
     };
 
     match outcome {
@@ -390,13 +400,13 @@ fn state_to_json(state: &State) -> String {
 }
 
 fn collect_addresses_json() -> String {
+    let mut rows = Vec::new();
     let output = Command::new("ip")
         .args(["-o", "addr", "show", "scope", "global"])
         .output();
     if let Ok(output) = output {
         if output.status.success() {
             let raw = String::from_utf8_lossy(&output.stdout);
-            let mut rows = Vec::new();
             for line in raw.lines() {
                 let cols: Vec<&str> = line.split_whitespace().collect();
                 if cols.len() < 4 {
@@ -421,35 +431,149 @@ fn collect_addresses_json() -> String {
                     json_escape(cidr)
                 ));
             }
-            if !rows.is_empty() {
-                return format!("[{}]", rows.join(","));
-            }
         }
     }
 
-    let output = Command::new("hostname").arg("-I").output();
-    if let Ok(output) = output {
-        if output.status.success() {
-            let raw = String::from_utf8_lossy(&output.stdout);
-            let rows: Vec<String> = raw
-                .split_whitespace()
-                .filter(|address| !address.is_empty())
-                .map(|address| {
+    if rows.is_empty() {
+        let output = Command::new("hostname").arg("-I").output();
+        if let Ok(output) = output {
+            if output.status.success() {
+                let raw = String::from_utf8_lossy(&output.stdout);
+                rows.extend(raw.split_whitespace().filter(|address| !address.is_empty()).map(|address| {
                     let family = if address.contains(':') { "ipv6" } else { "ipv4" };
                     format!(
                         "{{\"interface\":\"hostname\",\"family\":\"{}\",\"address\":\"{}\",\"cidr\":\"\"}}",
                         family,
                         json_escape(address)
                     )
-                })
-                .collect();
-            if !rows.is_empty() {
-                return format!("[{}]", rows.join(","));
+                }));
             }
         }
     }
 
-    "[]".to_string()
+    if let Some(geo) = public_geo() {
+        if !geo.ip.trim().is_empty() && !rows.iter().any(|row| row.contains(&format!("\"address\":\"{}\"", json_escape(&geo.ip)))) {
+            rows.push(public_geo_address_json(&geo));
+        }
+    }
+
+    if rows.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", rows.join(","))
+    }
+}
+
+fn public_geo() -> Option<PublicGeo> {
+    if env::var("PULSEDECK_PUBLIC_GEO")
+        .map(|value| matches!(value.as_str(), "0" | "false" | "off" | "disabled"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    if let Some(cached) = read_public_geo_cache() {
+        return Some(cached);
+    }
+    let geo = fetch_public_geo()?;
+    write_public_geo_cache(&geo);
+    Some(geo)
+}
+
+fn read_public_geo_cache() -> Option<PublicGeo> {
+    let raw = fs::read_to_string(public_geo_cache_file()).ok()?;
+    let cached_at = json_get_number(&raw, "cachedAt").unwrap_or(0);
+    let now = unix_seconds();
+    if cached_at == 0 || now.saturating_sub(cached_at) > 21_600 {
+        return None;
+    }
+    let geo = PublicGeo {
+        ip: json_get_string(&raw, "ip").unwrap_or_default(),
+        region: json_get_string(&raw, "region").unwrap_or_default(),
+        country_code: json_get_string(&raw, "countryCode").unwrap_or_default(),
+        city: json_get_string(&raw, "city").unwrap_or_default(),
+        source: json_get_string(&raw, "source").unwrap_or_else(|| "agent-public-lookup".to_string()),
+        cached_at,
+    };
+    if geo.ip.trim().is_empty() {
+        None
+    } else {
+        Some(geo)
+    }
+}
+
+fn fetch_public_geo() -> Option<PublicGeo> {
+    if !command_exists("curl") {
+        return None;
+    }
+    let output = Command::new("curl")
+        .args(["-fsS", "--max-time", "2", "https://ipapi.co/json/"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let ip = json_get_string(&raw, "ip").unwrap_or_default();
+    if ip.trim().is_empty() {
+        return None;
+    }
+    Some(PublicGeo {
+        ip,
+        region: json_get_string(&raw, "region")
+            .or_else(|| json_get_string(&raw, "country_name"))
+            .unwrap_or_default(),
+        country_code: json_get_string(&raw, "country_code")
+            .or_else(|| json_get_string(&raw, "countryCode"))
+            .or_else(|| json_get_string(&raw, "country"))
+            .unwrap_or_default(),
+        city: json_get_string(&raw, "city").unwrap_or_default(),
+        source: "agent-public-lookup".to_string(),
+        cached_at: unix_seconds(),
+    })
+}
+
+fn write_public_geo_cache(geo: &PublicGeo) {
+    let file = public_geo_cache_file();
+    if let Some(parent) = file.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(
+        file,
+        format!(
+            "{{\"ip\":\"{}\",\"region\":\"{}\",\"countryCode\":\"{}\",\"city\":\"{}\",\"source\":\"{}\",\"cachedAt\":{}}}\n",
+            json_escape(&geo.ip),
+            json_escape(&geo.region),
+            json_escape(&geo.country_code),
+            json_escape(&geo.city),
+            json_escape(&geo.source),
+            geo.cached_at
+        ),
+    );
+}
+
+fn public_geo_cache_file() -> PathBuf {
+    if let Ok(home) = env::var("PULSEDECK_AGENT_HOME") {
+        if !home.trim().is_empty() {
+            return Path::new(&home).join("state/public-geo.json");
+        }
+    }
+    let config_path = find_config_path();
+    let raw = fs::read_to_string(&config_path).unwrap_or_default();
+    let agent_home = json_get_string(&raw, "agentHome").unwrap_or_else(|| parent_parent(&config_path));
+    Path::new(&agent_home).join("state/public-geo.json")
+}
+
+fn public_geo_address_json(geo: &PublicGeo) -> String {
+    let family = if geo.ip.contains(':') { "ipv6" } else { "ipv4" };
+    format!(
+        "{{\"interface\":\"public-lookup\",\"family\":\"{}\",\"address\":\"{}\",\"cidr\":\"\",\"region\":\"{}\",\"countryCode\":\"{}\",\"city\":\"{}\",\"source\":\"{}\"}}",
+        family,
+        json_escape(&geo.ip),
+        json_escape(&geo.region),
+        json_escape(&geo.country_code),
+        json_escape(&geo.city),
+        json_escape(&geo.source)
+    )
 }
 
 fn collect_metrics_json() -> String {
@@ -531,49 +655,49 @@ fn status() -> Result<(), String> {
     let config = load_config()?;
     let state = load_state(&config.state_file);
     println!("PulseDeck Rust Agent {VERSION}");
-    println!("config: {}", config.config_path);
-    println!("state: {}", config.state_file);
-    println!("panel: {}", empty_dash(&config.base_url));
-    println!("install: {}", mask(&config.install_id));
-    println!("agent: {}", mask(&state.agent_id));
-    println!("node: {}", empty_dash(&state.node_name));
-    println!("service: {}", empty_dash(&config.service_mode));
-    println!("last seen: {}", display_seen_at(&state.last_seen_at));
-    println!("collector: rust-native active, rust-control active");
+    println!("配置文件：{}", config.config_path);
+    println!("状态文件：{}", config.state_file);
+    println!("面板地址：{}", empty_dash(&config.base_url));
+    println!("安装 ID：{}", mask(&config.install_id));
+    println!("Agent ID：{}", mask(&state.agent_id));
+    println!("节点名称：{}", empty_dash(&state.node_name));
+    println!("服务模式：{}", empty_dash(&config.service_mode));
+    println!("最后上报：{}", display_seen_at(&state.last_seen_at));
+    println!("采集器：Rust 原生采集已启用，远程控制已启用");
     Ok(())
 }
 
 fn info() -> Result<(), String> {
     let config = load_config()?;
     let state = load_state(&config.state_file);
-    println!("PulseDeck Rust Agent information");
-    println!("version: {VERSION}");
-    println!("platform: {}/{}", os_name(), arch_name());
-    println!("target: {}", agent_target());
-    println!("binary: {}", env::current_exe().map(|path| path.to_string_lossy().to_string()).unwrap_or_else(|_| "-".to_string()));
-    println!("config: {}", config.config_path);
-    println!("agent home: {}", config.agent_home);
-    println!("state: {}", config.state_file);
-    println!("log: {}", config.log_file);
-    println!("panel: {}", empty_dash(&config.base_url));
-    println!("install: {}", mask(&config.install_id));
-    println!("agent: {}", mask(&state.agent_id));
-    println!("node: {}", empty_dash(&state.node_name));
-    println!("enrolled: {}", empty_dash(&state.enrolled_at));
-    println!("last seen: {}", empty_dash(&state.last_seen_at));
-    println!("configured service mode: {}", empty_dash(&config.service_mode));
-    println!("service status: {}", service_status_summary());
-    println!("sing-box binary: {}", find_sing_box_binary().unwrap_or_else(|| "-".to_string()));
-    println!("sing-box version: {}", sing_box_version().unwrap_or_else(|| "-".to_string()));
+    println!("PulseDeck Rust Agent 信息");
+    println!("版本：{VERSION}");
+    println!("平台：{}/{}", os_name(), arch_name());
+    println!("目标包：{}", agent_target());
+    println!("程序路径：{}", env::current_exe().map(|path| path.to_string_lossy().to_string()).unwrap_or_else(|_| "-".to_string()));
+    println!("配置文件：{}", config.config_path);
+    println!("Agent 目录：{}", config.agent_home);
+    println!("状态文件：{}", config.state_file);
+    println!("日志文件：{}", config.log_file);
+    println!("面板地址：{}", empty_dash(&config.base_url));
+    println!("安装 ID：{}", mask(&config.install_id));
+    println!("Agent ID：{}", mask(&state.agent_id));
+    println!("节点名称：{}", empty_dash(&state.node_name));
+    println!("注册时间：{}", display_seen_at(&state.enrolled_at));
+    println!("最后上报：{}", display_seen_at(&state.last_seen_at));
+    println!("配置服务模式：{}", empty_dash(&config.service_mode));
+    println!("服务状态：{}", service_status_summary());
+    println!("sing-box 程序：{}", find_sing_box_binary().unwrap_or_else(|| "-".to_string()));
+    println!("sing-box 版本：{}", sing_box_version().unwrap_or_else(|| "-".to_string()));
     Ok(())
 }
 
 fn doctor() -> Result<(), String> {
     let config = load_config()?;
-    println!("PulseDeck Rust Agent doctor ({VERSION})");
-    println!("platform: {}/{}", os_name(), arch_name());
-    println!("config: {}", config.config_path);
-    println!("state: {}", config.state_file);
+    println!("PulseDeck Rust Agent 诊断 ({VERSION})");
+    println!("平台：{}/{}", os_name(), arch_name());
+    println!("配置文件：{}", config.config_path);
+    println!("状态文件：{}", config.state_file);
     println!("{}", collect_diagnostics_json(&config));
     Ok(())
 }
@@ -582,7 +706,7 @@ fn print_logs(lines: usize) -> Result<(), String> {
     let config = load_config()?;
     let raw = fs::read_to_string(&config.log_file).unwrap_or_default();
     if raw.is_empty() {
-        println!("No log file at {}", config.log_file);
+        println!("暂无日志文件：{}", config.log_file);
         return Ok(());
     }
     let rows: Vec<&str> = raw.lines().collect();
@@ -596,15 +720,15 @@ fn print_logs(lines: usize) -> Result<(), String> {
 fn restart() -> Result<(), String> {
     if command_exists("systemctl") {
         let _ = Command::new("systemctl").args(["restart", "pulsedeck-agent.service"]).status();
-        println!("restart requested through systemd");
+        println!("已通过 systemd 请求重启 Agent");
         return Ok(());
     }
     if command_exists("rc-service") {
         let _ = Command::new("rc-service").args(["pulsedeck-agent", "restart"]).status();
-        println!("restart requested through OpenRC");
+        println!("已通过 OpenRC 请求重启 Agent");
         return Ok(());
     }
-    println!("No supported service manager found. Stop the current Agent process and run: pk daemon");
+    println!("未找到支持的服务管理器。请停止当前 Agent 进程后运行：pk daemon");
     Ok(())
 }
 
@@ -612,8 +736,8 @@ fn install_service_command() -> Result<(), String> {
     let config = load_config()?;
     let mode = install_agent_service(&config)?;
     set_config_service_mode(&config, &mode)?;
-    println!("Agent service installed or repaired through {mode}");
-    println!("service status: {}", service_status_summary());
+    println!("Agent 服务已通过 {mode} 安装或修复");
+    println!("服务状态：{}", service_status_summary());
     Ok(())
 }
 
@@ -735,9 +859,9 @@ fn stop_agent_service() -> Result<(), String> {
             .unwrap_or(false);
     }
     if stopped {
-        println!("Agent stop requested");
+        println!("已请求停止 Agent");
     } else {
-        println!("No running PulseDeck Agent service was stopped");
+        println!("没有停止任何正在运行的 PulseDeck Agent 服务");
     }
     Ok(())
 }
@@ -745,25 +869,25 @@ fn stop_agent_service() -> Result<(), String> {
 fn update_check() -> Result<(), String> {
     let config = load_config()?;
     let target = agent_target();
-    println!("local version: {VERSION}");
-    println!("target: {target}");
+    println!("本地版本：{VERSION}");
+    println!("目标包：{target}");
 
     match fetch_runtime_manifest(&config, &target) {
         Ok(manifest) if manifest.available => {
-            println!("panel runtime version: {}", blank_dash(&manifest.version));
-            println!("runtime endpoint: {}", runtime_download_url(&config, &target, Some(&manifest)));
-            println!("runtime size: {} bytes", manifest.size_bytes);
-            println!("runtime sha256: {}", blank_dash(&manifest.sha256));
+            println!("面板运行时版本：{}", blank_dash(&manifest.version));
+            println!("下载地址：{}", runtime_download_url(&config, &target, Some(&manifest)));
+            println!("文件大小：{} bytes", manifest.size_bytes);
+            println!("SHA-256：{}", blank_dash(&manifest.sha256));
             if manifest.version == VERSION {
-                println!("status: local Agent matches the panel runtime version");
+                println!("状态：本地 Agent 已是面板发布版本");
             } else {
-                println!("status: update available");
+                println!("状态：发现可更新版本");
             }
         }
         Ok(manifest) => {
-            println!("panel runtime version: {}", blank_dash(&manifest.version));
-            println!("runtime endpoint: {}", runtime_download_url(&config, &target, Some(&manifest)));
-            println!("status: runtime binary is not published for this target yet");
+            println!("面板运行时版本：{}", blank_dash(&manifest.version));
+            println!("下载地址：{}", runtime_download_url(&config, &target, Some(&manifest)));
+            println!("状态：当前目标包还未发布");
         }
         Err(error) => {
             let url = runtime_download_url(&config, &target, None);
@@ -773,31 +897,31 @@ fn update_check() -> Result<(), String> {
             download_to(&url, &tmp.to_string_lossy())?;
             let size = fs::metadata(&tmp).map(|meta| meta.len()).unwrap_or(0);
             let _ = fs::remove_file(&tmp);
-            println!("runtime manifest unavailable: {error}");
-            println!("runtime endpoint: {url}");
-            println!("latest runtime is downloadable: {size} bytes");
+            println!("运行时清单不可用：{error}");
+            println!("下载地址：{url}");
+            println!("最新运行时可下载：{size} bytes");
         }
     }
-    println!("run `pk update` to replace the local Agent binary");
+    println!("运行 `pk update` 可替换本地 Agent 程序");
     Ok(())
 }
 
 fn uninstall_agent(assume_yes: bool) -> Result<(), String> {
     let config = load_config()?;
-    println!("PulseDeck Agent uninstall");
-    println!("config: {}", config.config_path);
-    println!("agent home: {}", config.agent_home);
-    println!("service files: systemd/OpenRC/cron when present");
-    println!("shortcuts: PK, pk, RK, rk");
+    println!("PulseDeck Agent 卸载");
+    println!("配置文件：{}", config.config_path);
+    println!("Agent 目录：{}", config.agent_home);
+    println!("服务文件：如存在将清理 systemd/OpenRC/cron 配置");
+    println!("快捷命令：PK, pk, RK, rk");
     if !assume_yes {
-        print!("Type uninstall to continue: ");
+        print!("输入 uninstall 确认卸载：");
         let _ = io::stdout().flush();
         let mut answer = String::new();
         io::stdin()
             .read_line(&mut answer)
             .map_err(|error| format!("cannot read confirmation: {error}"))?;
         if answer.trim() != "uninstall" {
-            println!("Uninstall cancelled");
+            println!("已取消卸载");
             return Ok(());
         }
     }
@@ -812,11 +936,11 @@ fn uninstall_agent(assume_yes: bool) -> Result<(), String> {
     let _ = fs::remove_file(protocols_state_file(&config));
     if safe_agent_home(&config.agent_home) {
         let _ = fs::remove_dir_all(&config.agent_home);
-        println!("Removed Agent home {}", config.agent_home);
+        println!("已删除 Agent 目录 {}", config.agent_home);
     } else {
-        println!("Left custom Agent home in place: {}", config.agent_home);
+        println!("自定义 Agent 目录已保留：{}", config.agent_home);
     }
-    println!("PulseDeck Agent uninstall completed");
+    println!("PulseDeck Agent 卸载完成");
     Ok(())
 }
 
@@ -838,29 +962,29 @@ fn update_self() -> Result<(), String> {
     make_executable(Path::new(&next))?;
     let _ = fs::copy(&current, &backup);
     fs::rename(&next, &current).map_err(|error| format!("cannot replace Agent binary: {error}"))?;
-    println!("Agent binary updated. Backup: {backup}");
+    println!("Agent 程序已更新，备份：{backup}");
     if let Some(manifest) = manifest.as_ref() {
-        println!("updated runtime version: {}", blank_dash(&manifest.version));
+        println!("更新后运行时版本：{}", blank_dash(&manifest.version));
     }
     Ok(())
 }
 
 fn menu() -> Result<(), String> {
     println!("PulseDeck Rust Agent");
-    println!("1. install or repair Agent service");
-    println!("2. delete/uninstall Agent");
-    println!("3. check Agent update");
-    println!("4. update Agent now");
-    println!("5. Agent information");
-    println!("6. service status");
-    println!("7. stop Agent");
-    println!("8. run once");
-    println!("9. logs");
-    println!("10. doctor");
-    println!("11. restart Agent");
-    println!("12. config path");
-    println!("0. exit");
-    print!("Select action [0-12]: ");
+    println!("1. 安装或修复 Agent 服务");
+    println!("2. 删除/卸载 Agent");
+    println!("3. 检测 Agent 更新");
+    println!("4. 立即更新 Agent");
+    println!("5. 查看 Agent 信息");
+    println!("6. 查看服务状态");
+    println!("7. 停止 Agent");
+    println!("8. 立即上报一次");
+    println!("9. 查看日志");
+    println!("10. 运行诊断");
+    println!("11. 重启 Agent");
+    println!("12. 查看配置路径");
+    println!("0. 退出");
+    print!("请选择操作 [0-12]：");
     let _ = io::stdout().flush();
     let mut answer = String::new();
     io::stdin()
@@ -1146,10 +1270,10 @@ fn verify_file_sha256(file: &Path, expected: &str) -> Result<(), String> {
     }
     let actual = file_sha256(file)?;
     if actual.eq_ignore_ascii_case(expected.trim()) {
-        println!("runtime sha256 verified: {actual}");
+        println!("运行时 SHA-256 校验通过：{actual}");
         Ok(())
     } else {
-        Err(format!("runtime sha256 mismatch: expected {}, got {actual}", expected.trim()))
+        Err(format!("运行时 SHA-256 不匹配：期望 {}，实际 {actual}", expected.trim()))
     }
 }
 
@@ -1298,7 +1422,7 @@ fn absolute_url(config: &Config, endpoint: &str) -> String {
 fn render_sing_box_result(config: &Config, state: &State, agent_command: &AgentCommand) -> Result<String, String> {
     let rendered = render_sing_box_config(config, state, agent_command, false)?;
     Ok(format!(
-        "{{\"message\":\"sing-box config rendered\",\"agentVersion\":\"{}\",\"singBox\":{{\"installed\":{},\"version\":\"{}\",\"binaryPath\":\"{}\",\"configPath\":\"{}\",\"workDir\":\"{}\",\"status\":\"rendered\",\"lastRenderAt\":\"{}\"}},\"protocolCount\":{},\"previewLinks\":{}}}",
+        "{{\"message\":\"sing-box 配置已渲染\",\"agentVersion\":\"{}\",\"singBox\":{{\"installed\":{},\"version\":\"{}\",\"binaryPath\":\"{}\",\"configPath\":\"{}\",\"workDir\":\"{}\",\"status\":\"rendered\",\"lastRenderAt\":\"{}\"}},\"protocolCount\":{},\"previewLinks\":{}}}",
         json_escape(VERSION),
         if find_sing_box_binary().is_some() { "true" } else { "false" },
         json_escape(&sing_box_version().unwrap_or_default()),
@@ -1313,7 +1437,7 @@ fn render_sing_box_result(config: &Config, state: &State, agent_command: &AgentC
 
 fn render_and_apply_sing_box(config: &Config, state: &State, agent_command: &AgentCommand) -> Result<String, String> {
     if find_sing_box_binary().is_none() {
-        return Err("sing-box binary was not found; run sing-box-install or install sing-box manually".to_string());
+        return Err("未找到 sing-box 可执行文件；请先下发 sing-box 安装命令或手动安装".to_string());
     }
     let rendered = render_sing_box_config(config, state, agent_command, true)?;
     let applied = apply_sing_box_config(&rendered.config_path)?;
@@ -1342,7 +1466,7 @@ fn render_and_apply_sing_box(config: &Config, state: &State, agent_command: &Age
 }
 
 fn restart_sing_box_result(config: &Config) -> Result<String, String> {
-    let binary = find_sing_box_binary().ok_or_else(|| "sing-box binary was not found".to_string())?;
+    let binary = find_sing_box_binary().ok_or_else(|| "未找到 sing-box 可执行文件".to_string())?;
     let version = sing_box_version().unwrap_or_default();
     let restart = restart_sing_box_service();
     Ok(format!(
@@ -1367,13 +1491,13 @@ fn restart_sing_box_result(config: &Config) -> Result<String, String> {
 fn install_or_update_sing_box(config: &Config, agent_command: &AgentCommand, reinstall: bool) -> Result<String, String> {
     if !reinstall {
         if let Some(binary) = find_sing_box_binary() {
-            return Ok(sing_box_install_result(config, &binary, "sing-box already installed"));
+            return Ok(sing_box_install_result(config, &binary, "sing-box 已安装"));
         }
     }
 
     let download_url = select_sing_box_download_url(agent_command)?;
     if download_url.is_empty() {
-        return Err("sing-box binary was not found; provide payload.downloadUrl, payload.version, PULSEDECK_SING_BOX_DOWNLOAD_URL, or PULSEDECK_SING_BOX_VERSION".to_string());
+        return Err("未找到 sing-box 可执行文件；请提供 payload.downloadUrl、payload.version、PULSEDECK_SING_BOX_DOWNLOAD_URL 或 PULSEDECK_SING_BOX_VERSION".to_string());
     }
 
     let bin_dir = Path::new(&config.agent_home).join("bin");
@@ -1398,7 +1522,7 @@ fn install_or_update_sing_box(config: &Config, agent_command: &AgentCommand, rei
         let _ = fs::copy(&target, backup);
     }
     fs::rename(&next, &target).map_err(|error| format!("cannot install sing-box binary: {error}"))?;
-    Ok(sing_box_install_result(config, &target.to_string_lossy(), "sing-box binary installed"))
+    Ok(sing_box_install_result(config, &target.to_string_lossy(), "sing-box 程序已安装"))
 }
 
 fn sing_box_install_result(config: &Config, binary: &str, message: &str) -> String {
@@ -1642,7 +1766,7 @@ fn protocol_tls_json(protocol: &NodeProtocol, secret: &str) -> Result<String, St
 }
 
 fn apply_sing_box_config(config_path: &str) -> Result<ApplyOutcome, String> {
-    let binary = find_sing_box_binary().ok_or_else(|| "sing-box binary was not found; run sing-box-install or install sing-box manually".to_string())?;
+    let binary = find_sing_box_binary().ok_or_else(|| "未找到 sing-box 可执行文件；请先下发 sing-box 安装命令或手动安装".to_string())?;
     let version = sing_box_version().unwrap_or_default();
     let check = Command::new(&binary)
         .args(["check", "-c", config_path])
@@ -1651,7 +1775,7 @@ fn apply_sing_box_config(config_path: &str) -> Result<ApplyOutcome, String> {
     if !check.status.success() {
         let stderr = String::from_utf8_lossy(&check.stderr);
         let stdout = String::from_utf8_lossy(&check.stdout);
-        return Err(format!("sing-box config check failed: {}{}", stdout, stderr));
+        return Err(format!("sing-box 配置检查失败：{}{}", stdout, stderr));
     }
     let restart = restart_sing_box_service();
     Ok(ApplyOutcome {
@@ -1666,20 +1790,20 @@ fn apply_sing_box_config(config_path: &str) -> Result<ApplyOutcome, String> {
 fn restart_sing_box_service() -> (bool, String) {
     if command_exists("systemctl") {
         if Command::new("systemctl").args(["restart", "sing-box.service"]).status().map(|status| status.success()).unwrap_or(false) {
-            return (true, "sing-box restarted through systemd".to_string());
+            return (true, "sing-box 已通过 systemd 重启".to_string());
         }
     }
     if command_exists("rc-service") {
         if Command::new("rc-service").args(["sing-box", "restart"]).status().map(|status| status.success()).unwrap_or(false) {
-            return (true, "sing-box restarted through OpenRC".to_string());
+            return (true, "sing-box 已通过 OpenRC 重启".to_string());
         }
     }
     if command_exists("service") {
         if Command::new("service").args(["sing-box", "restart"]).status().map(|status| status.success()).unwrap_or(false) {
-            return (true, "sing-box restarted through service".to_string());
+            return (true, "sing-box 已通过 service 重启".to_string());
         }
     }
-    (false, "sing-box config validated; no supported service restart succeeded".to_string())
+    (false, "sing-box 配置已通过检查；未能通过已知服务管理器完成重启".to_string())
 }
 
 fn select_sing_box_config_path(config: &Config, agent_command: &AgentCommand, apply_target: bool) -> String {
@@ -2076,7 +2200,7 @@ fn atomic_write_checked_sing_box(file: &str, content: &str) -> Result<(), String
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!("sing-box config check failed before apply: {}{}", stdout, stderr));
+        return Err(format!("sing-box 配置写入前检查失败：{}{}", stdout, stderr));
     }
     atomic_write(file, content)
 }
@@ -2401,11 +2525,39 @@ fn url_component(input: &str) -> String {
 }
 
 fn now_string() -> String {
-    let seconds = SystemTime::now()
+    format!("{}", unix_seconds())
+}
+
+fn unix_seconds() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_else(|_| Duration::from_secs(0))
-        .as_secs();
-    format!("{seconds}")
+        .as_secs()
+}
+
+fn now_beijing_string() -> String {
+    format_unix_beijing(&now_string()).unwrap_or_else(now_string)
+}
+
+fn format_unix_beijing(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || !trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let at_value = format!("@{trimmed}");
+    for args in [
+        vec!["-d", at_value.as_str(), "+%Y.%m.%d %H:%M:%S"],
+        vec!["-r", trimmed, "+%Y.%m.%d %H:%M:%S"],
+    ] {
+        let output = Command::new("date").env("TZ", "Asia/Shanghai").args(args).output().ok()?;
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    None
 }
 
 fn log_line(config: &Config, line: &str) {
@@ -2413,7 +2565,7 @@ fn log_line(config: &Config, line: &str) {
         let _ = fs::create_dir_all(parent);
     }
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&config.log_file) {
-        let _ = writeln!(file, "{} {}", now_string(), line);
+        let _ = writeln!(file, "{} {}", now_beijing_string(), line);
     }
 }
 
@@ -2585,7 +2737,7 @@ fn display_seen_at(value: &str) -> String {
         return "-".to_string();
     }
     if value.chars().all(|ch| ch.is_ascii_digit()) {
-        return format!("{value} unix");
+        return format_unix_beijing(value).unwrap_or_else(|| format!("{value} unix"));
     }
     value.to_string()
 }

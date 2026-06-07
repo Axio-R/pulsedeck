@@ -7,19 +7,13 @@ import {
   type PulseAgentRuntimeTarget,
   type PulseHealth
 } from '@/service/api';
+import { formatBeijingTime, formatBytes } from '@/utils/pulse-format';
 
 const loading = ref(false);
 const health = ref<PulseHealth | null>(null);
 const runtimeManifest = ref<PulseAgentRuntimeManifest | null>(null);
 
 const runtimeTargets = computed(() => runtimeManifest.value?.targets || []);
-
-function formatBytes(value: number) {
-  if (!value) return '-';
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / 1024 / 1024).toFixed(2)} MB`;
-}
 
 function shortSha(target: PulseAgentRuntimeTarget) {
   return target.sha256 ? `${target.sha256.slice(0, 12)}...${target.sha256.slice(-8)}` : '-';
@@ -61,7 +55,7 @@ onMounted(loadData);
 
       <div class="runtime-head">
         <NText strong>Agent Runtime</NText>
-        <NText depth="3">{{ runtimeManifest?.generatedAt || health?.time || '-' }}</NText>
+        <NText depth="3">{{ formatBeijingTime(runtimeManifest?.generatedAt || health?.time) }}</NText>
       </div>
 
       <div class="runtime-list">
@@ -74,7 +68,7 @@ onMounted(loadData);
             <NTag size="small" :type="target.available ? 'success' : 'warning'" :bordered="false">
               {{ target.available ? '已发布' : '未发布' }}
             </NTag>
-            <span>{{ formatBytes(target.sizeBytes) }}</span>
+            <span>{{ target.sizeBytes ? formatBytes(target.sizeBytes) : '-' }}</span>
             <code>{{ shortSha(target) }}</code>
           </div>
           <NButton size="tiny" tag="a" :href="target.downloadUrl" target="_blank" :disabled="!target.available">下载</NButton>

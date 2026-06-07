@@ -2,6 +2,7 @@
 import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue';
 import { NButton, NTag } from 'naive-ui';
 import { fetchPulseCommandEvents, fetchPulseCommands, openPulseCommandEventSource, type PulseCommand, type PulseCommandEvent } from '@/service/api';
+import { formatBeijingTime } from '@/utils/pulse-format';
 
 const loading = ref(false);
 const commands = ref<PulseCommand[]>([]);
@@ -43,7 +44,14 @@ const columns = computed(() => [
       return shortId(row.nodeId);
     }
   },
-  { title: '更新时间', key: 'updatedAt', minWidth: 180 },
+  {
+    title: '更新时间',
+    key: 'updatedAt',
+    minWidth: 180,
+    render(row: PulseCommand) {
+      return formatBeijingTime(row.updatedAt);
+    }
+  },
   {
     title: '输出',
     key: 'events',
@@ -58,7 +66,7 @@ const eventLog = computed(() => {
   if (!commandEvents.value.length) return '暂无事件';
   return commandEvents.value
     .map((event) => {
-      const prefix = `${event.createdAt || ''} [${event.stream || event.type}]`;
+      const prefix = `${formatBeijingTime(event.createdAt)} [${event.stream || event.type}]`;
       const payload = event.payload && Object.keys(event.payload).length ? ` ${JSON.stringify(event.payload)}` : '';
       return `${prefix} ${event.message || ''}${payload}`.trim();
     })
@@ -190,7 +198,7 @@ onBeforeUnmount(closeEventSource);
             <NDescriptionsItem label="状态">{{ commandStatusLabel(selectedCommand.status) }}</NDescriptionsItem>
             <NDescriptionsItem label="节点">{{ shortId(selectedCommand.nodeId) }}</NDescriptionsItem>
             <NDescriptionsItem label="Agent">{{ shortId(selectedCommand.agentId || '') }}</NDescriptionsItem>
-            <NDescriptionsItem label="更新时间">{{ selectedCommand.updatedAt }}</NDescriptionsItem>
+            <NDescriptionsItem label="更新时间">{{ formatBeijingTime(selectedCommand.updatedAt) }}</NDescriptionsItem>
             <NDescriptionsItem label="结果">{{ commandResultSummary(selectedCommand) }}</NDescriptionsItem>
           </NDescriptions>
           <pre class="event-log">{{ eventLog }}</pre>

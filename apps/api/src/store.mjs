@@ -67,6 +67,7 @@ function normalizePort(value, fallback = 443) {
 }
 
 function normalizeTraffic(input = {}) {
+  const limitMode = ['total', 'download', 'upload'].includes(input.limitMode) ? input.limitMode : 'total';
   return {
     totalRxBytes: Number(input.totalRxBytes) || 0,
     totalTxBytes: Number(input.totalTxBytes) || 0,
@@ -78,6 +79,7 @@ function normalizeTraffic(input = {}) {
     rxRateBytesPerSecond: Number(input.rxRateBytesPerSecond) || 0,
     txRateBytesPerSecond: Number(input.txRateBytesPerSecond) || 0,
     thresholdBytes: Number(input.thresholdBytes) || 0,
+    limitMode,
     warningPercent: Number(input.warningPercent) || 80,
     autoDisableSubscription: input.autoDisableSubscription === true,
     thresholdExceededAt: input.thresholdExceededAt || null,

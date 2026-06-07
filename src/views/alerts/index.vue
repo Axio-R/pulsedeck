@@ -14,6 +14,7 @@ import {
   type PulseAlertPolicy,
   type PulseChannels
 } from '@/service/api';
+import { formatBeijingTime } from '@/utils/pulse-format';
 
 const loading = ref(false);
 const saving = ref(false);
@@ -203,7 +204,7 @@ function eventTypeLabel(type: string) {
 }
 
 function formatTime(value: string) {
-  return value ? new Date(value).toLocaleString() : '-';
+  return formatBeijingTime(value);
 }
 
 onMounted(loadData);

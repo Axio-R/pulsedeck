@@ -86,6 +86,29 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 ### 2026-06-07
 
 - Implementation direction for this turn:
+  - Remove default-port suffixes from protocol selection labels and keep per-node port customization explicit.
+  - Standardize visible panel time formatting to Beijing time as `YYYY.MM.DD HH:mm:ss`.
+  - Improve Agent and panel node-region auto detection by allowing the Agent to report a cached public IP region fallback when local GeoIP is unavailable.
+  - Expand traffic accounting and UI around download, upload, and total usage, including selectable traffic-limit accounting mode and clearer charts.
+  - Localize Agent interactive/menu output and install/runtime messages to Simplified Chinese while keeping API keys stable.
+  - Prepare a `v0.2.5` release after verification and deployment.
+- Implementation completed before commit:
+  - Added a shared frontend formatter for Beijing time, bytes, and rates; converted dashboard, nodes, alerts, commands, and settings pages to use Beijing time display.
+  - Removed default-port suffixes from protocol select labels while keeping explicit per-node custom port inputs.
+  - Expanded node cards and the dashboard to show download rate, upload rate, download total, upload total, and total traffic with real-time charts.
+  - Added per-node traffic-limit accounting mode for total/download/upload and applied the selected mode to warning/threshold evaluation.
+  - Added Agent-provided public region fallback fields to address reporting, plus backend fallback when local GeoIP is missing or has no match.
+  - Added a lightweight cached Agent public IP region lookup using short-timeout curl and a six-hour state cache.
+  - Localized the Agent interactive menu, common `pk` status/info/update/uninstall output, installer messages, and common sing-box command result messages to Simplified Chinese.
+  - Bumped panel and Agent metadata to `0.2.5` / `0.2.5-rust`.
+- Local verification before commit:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 12 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `git diff --check`: passed after cleaning generated router typing whitespace.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+- Implementation direction for this turn:
   - Perform a deeper panel/Agent operations pass without adding heavy dependencies.
   - Add real-time node traffic usage charts from the existing traffic WebSocket.
   - Make the dashboard show global live traffic trend and operational status instead of static-only counters.
