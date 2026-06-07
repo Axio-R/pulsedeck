@@ -155,8 +155,12 @@ const columns = computed<DataTableColumns<PulseNode>>(() => [
         h(NButton, { size: 'small', onClick: () => openInstallDrawer(row) }, { default: () => '安装命令' }),
         h(NButton, { size: 'small', onClick: () => copyInstall(row) }, { default: () => '复制安装' }),
         h(NButton, { size: 'small', onClick: () => queue(row, 'probe') }, { default: () => '探测' }),
-        h(NButton, { size: 'small', onClick: () => queue(row, 'agent-update-check') }, { default: () => '检查 Agent' }),
-        h(NButton, { size: 'small', type: 'primary', secondary: true, onClick: () => queue(row, 'agent-update') }, { default: () => '更新 Agent' }),
+        h(NButton, { size: 'small', disabled: !canRemoteUpdateAgent(row), onClick: () => queue(row, 'agent-update-check') }, { default: () => '检查 Agent' }),
+        h(
+          NButton,
+          { size: 'small', type: 'primary', secondary: true, disabled: !canRemoteUpdateAgent(row), onClick: () => queue(row, 'agent-update') },
+          { default: () => '更新 Agent' }
+        ),
         h(NButton, { size: 'small', onClick: () => resetLinks(row) }, { default: () => '重置链接' }),
         h(
           NPopconfirm,
@@ -307,6 +311,16 @@ async function batchQueue(type: string) {
     return;
   }
   const result = await batchPulseNodeCommand(selectedNodeIds.value, type);
+  window.$message?.success(`已批量下发 ${result.queued} 条${commandLabel(type)}命令`);
+}
+
+async function batchAgentQueue(type: 'agent-update-check' | 'agent-update') {
+  const nodeIds = nodes.value.filter(node => selectedNodeIds.value.includes(node.id) && canRemoteUpdateAgent(node)).map(node => node.id);
+  if (!nodeIds.length) {
+    window.$message?.warning('所选节点的 Agent 需先本地更新到 0.2.8 后才支持远程更新');
+    return;
+  }
+  const result = await batchPulseNodeCommand(nodeIds, type);
   window.$message?.success(`已批量下发 ${result.queued} 条${commandLabel(type)}命令`);
 }
 
@@ -527,6 +541,10 @@ function agentUpdateLabel(node: PulseNode) {
   if (update?.status === 'unavailable') return '目标包未发布';
   if (node.agent?.runtimeAvailable === false) return '运行时未发布';
   return node.agent?.version && node.agent.version !== 'unknown' ? '最新' : '待上报';
+}
+
+function canRemoteUpdateAgent(node: PulseNode) {
+  return node.agent?.remoteUpdateSupported === true;
 }
 
 function nodeIpRows(node: PulseNode): NodeIpRow[] {
@@ -873,8 +891,8 @@ onUnmounted(() => {
         <NSelect v-model:value="groupFilter" size="small" :options="groupOptions" class="toolbar-select" />
         <NButton size="small" secondary @click="batchQueue('probe')">批量探测</NButton>
         <NButton size="small" secondary @click="batchQueue('diagnostics')">批量诊断</NButton>
-        <NButton size="small" secondary @click="batchQueue('agent-update-check')">批量检查 Agent</NButton>
-        <NButton size="small" type="primary" secondary @click="batchQueue('agent-update')">批量更新 Agent</NButton>
+        <NButton size="small" secondary @click="batchAgentQueue('agent-update-check')">批量检查 Agent</NButton>
+        <NButton size="small" type="primary" secondary @click="batchAgentQueue('agent-update')">批量更新 Agent</NButton>
         <NButton size="small" type="primary" secondary @click="batchQueue('sing-box-apply')">批量应用</NButton>
         <NButton size="small" secondary @click="resetSelectedTraffic">清零流量</NButton>
         <NPopconfirm @positive-click="batchDelete">
@@ -1208,8 +1226,8 @@ onUnmounted(() => {
             <NButton size="small" @click="moveNode(node, 1)">下移</NButton>
             <NButton size="small" @click="queue(node, 'probe')">探测</NButton>
             <NButton size="small" @click="queue(node, 'diagnostics')">诊断</NButton>
-            <NButton size="small" @click="queue(node, 'agent-update-check')">检查 Agent</NButton>
-            <NButton size="small" type="primary" secondary @click="queue(node, 'agent-update')">更新 Agent</NButton>
+            <NButton size="small" :disabled="!canRemoteUpdateAgent(node)" @click="queue(node, 'agent-update-check')">检查 Agent</NButton>
+            <NButton size="small" type="primary" secondary :disabled="!canRemoteUpdateAgent(node)" @click="queue(node, 'agent-update')">更新 Agent</NButton>
             <NButton size="small" @click="queue(node, 'restart')">重启 Agent</NButton>
             <NButton size="small" @click="queue(node, 'sing-box-render')">渲染</NButton>
             <NButton size="small" type="primary" secondary @click="queue(node, 'sing-box-apply')">应用配置</NButton>

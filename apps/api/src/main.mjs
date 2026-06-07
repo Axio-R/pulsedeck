@@ -17,7 +17,7 @@ const DEFAULT_GEOIP_FILE = path.join(ROOT_DIR, 'geoip.json');
 const DEFAULT_GEOSITE_FILE = path.join(ROOT_DIR, 'geosite.json');
 const PORT = Number(process.env.PULSEDECK_PORT || 14770);
 const HOST = process.env.PULSEDECK_HOST || '0.0.0.0';
-const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.8';
+const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.9';
 const AGENT_VERSION = process.env.PULSEDECK_AGENT_VERSION || `${APP_VERSION}-rust`;
 const AGENT_RUNTIME_TARGETS = ['linux-x64', 'linux-arm64', 'linux-armv7l'];
 const ADMIN_USER = process.env.PULSEDECK_ADMIN_USER || 'admin';
@@ -196,6 +196,7 @@ function presentNodeAgent(node, data, req) {
   const latestVersion = runtime?.version || AGENT_VERSION;
   const available = runtime?.available === true;
   const updateAvailable = Boolean(currentVersion && currentVersion !== 'unknown' && latestVersion && currentVersion !== latestVersion);
+  const remoteUpdateSupported = agentVersionAtLeast(currentVersion, '0.2.8-rust');
   return {
     id: agent?.id || null,
     version: currentVersion || 'unknown',
@@ -208,6 +209,7 @@ function presentNodeAgent(node, data, req) {
     latestVersion,
     runtimeAvailable: available,
     updateAvailable,
+    remoteUpdateSupported,
     update: {
       ...(node.agentUpdate || {}),
       currentVersion: node.agentUpdate?.currentVersion || currentVersion || '',
@@ -217,6 +219,24 @@ function presentNodeAgent(node, data, req) {
       available: node.agentUpdate?.available ?? available
     }
   };
+}
+
+function agentVersionAtLeast(current, minimum) {
+  const currentParts = agentVersionParts(current);
+  const minimumParts = agentVersionParts(minimum);
+  if (!currentParts || !minimumParts) return false;
+  for (let index = 0; index < Math.max(currentParts.length, minimumParts.length); index += 1) {
+    const left = currentParts[index] || 0;
+    const right = minimumParts[index] || 0;
+    if (left > right) return true;
+    if (left < right) return false;
+  }
+  return true;
+}
+
+function agentVersionParts(input) {
+  const match = String(input || '').match(/(\d+)\.(\d+)\.(\d+)/);
+  return match ? match.slice(1).map((item) => Number(item)) : null;
 }
 
 function agentRuntimeTargetForAgent(agent) {

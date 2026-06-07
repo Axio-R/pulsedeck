@@ -90,11 +90,12 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - Add panel-visible Agent version state, remote Agent update check, and remote Agent binary update commands.
   - Add compact region icons/markers to node management and add region prefixes to subscription link names.
   - Add subscription Profile filters for nodes, groups, regions, and tags.
-  - Prepare the project metadata for `v0.2.8`.
+  - Prepare the project metadata for `v0.2.9`.
 - Implementation completed before commit:
-  - Bumped panel and Agent metadata to `0.2.8` / `0.2.8-rust`.
+  - Bumped panel and Agent metadata to `0.2.9` / `0.2.9-rust`.
   - Added node Agent metadata in the API response, including current version, inferred runtime target, latest panel Agent version, runtime availability, and update availability.
   - Added Rust Agent remote commands `agent-update-check` and `agent-update`; the update command replaces the Agent binary and reports that a restart is needed for the running process to switch versions.
+  - Added an Agent remote-update support flag so the panel can show available upgrades while disabling remote update buttons for older Agents that do not yet understand the new command; those nodes need one local `pk update` bootstrap.
   - Made the Rust Agent read the installer-provided `agentTarget` from config for update checks and updates.
   - Added node-table and node-card Agent controls for check/update/restart, plus batch Agent check/update actions.
   - Added compact region-code markers to node table/card region display.

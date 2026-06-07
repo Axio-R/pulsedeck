@@ -94,8 +94,8 @@ test('health reports PulseDeck on default product port', async () => {
     const { res, body } = await request(app.base, '/api/v1/health');
     assert.equal(res.status, 200);
     assert.equal(body.name, 'PulseDeck');
-    assert.equal(body.version, '0.2.8');
-    assert.equal(body.agentVersion, '0.2.8-rust');
+    assert.equal(body.version, '0.2.9');
+    assert.equal(body.agentVersion, '0.2.9-rust');
     assert.equal(body.port, 14770);
   } finally {
     await app.close();
@@ -107,7 +107,7 @@ test('agent runtime manifest exposes target metadata', async () => {
   try {
     const { res, body } = await request(app.base, '/api/v1/agents/runtime/manifest');
     assert.equal(res.status, 200);
-    assert.equal(body.agentVersion, '0.2.8-rust');
+    assert.equal(body.agentVersion, '0.2.9-rust');
     assert.ok(Array.isArray(body.targets));
     assert.deepEqual(
       body.targets.map((target) => target.target),
@@ -122,7 +122,7 @@ test('agent runtime manifest exposes target metadata', async () => {
     const single = await request(app.base, '/api/v1/agents/runtime/manifest/linux-x64');
     assert.equal(single.res.status, 200);
     assert.equal(single.body.target, 'linux-x64');
-    assert.equal(single.body.version, '0.2.8-rust');
+    assert.equal(single.body.version, '0.2.9-rust');
   } finally {
     await app.close();
   }
@@ -339,8 +339,9 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.equal(discovered.displayRegion, 'GeoIP 未配置');
     assert.equal(discovered.agent.version, '0.1.0-rust');
     assert.equal(discovered.agent.target, 'linux-x64');
-    assert.equal(discovered.agent.latestVersion, '0.2.8-rust');
+    assert.equal(discovered.agent.latestVersion, '0.2.9-rust');
     assert.equal(discovered.agent.updateAvailable, true);
+    assert.equal(discovered.agent.remoteUpdateSupported, false);
 
     const agentGeoNode = await request(app.base, '/api/v1/nodes', {
       method: 'POST',
@@ -383,7 +384,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     await request(app.base, `/api/v1/agents/enroll/${warpNode.body.installId}`, {
       method: 'POST',
       body: {
-        version: '0.2.8-rust',
+        version: '0.2.9-rust',
         platform: 'linux',
         arch: 'x86_64',
         installDir: '/var/lib/pulsedeck',
@@ -415,6 +416,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.equal(warpDiscovered.network.primaryIpv6, '2001:4860:4860::8888');
     assert.equal(warpDiscovered.network.warpIpv4, '104.28.215.69');
     assert.equal(warpDiscovered.network.warpIpv6, '2606:4700:110:80f3::1');
+    assert.equal(warpDiscovered.agent.remoteUpdateSupported, true);
 
     const patched = await request(app.base, `/api/v1/nodes/${created.body.id}`, {
       method: 'PATCH',
@@ -513,7 +515,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
               status: 'update-available',
               target: 'linux-x64',
               currentVersion: '0.1.0-rust',
-              latestVersion: '0.2.8-rust',
+              latestVersion: '0.2.9-rust',
               available: true,
               updateAvailable: true
             }
@@ -526,7 +528,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     const withAgentUpdate = listedAfterAgentCheck.body.items.find((node) => node.id === created.body.id);
     assert.equal(withAgentUpdate.agent.update.status, 'update-available');
     assert.equal(withAgentUpdate.agent.update.updateAvailable, true);
-    assert.equal(withAgentUpdate.agent.update.latestVersion, '0.2.8-rust');
+    assert.equal(withAgentUpdate.agent.update.latestVersion, '0.2.9-rust');
 
     const eventsAfterResult = await request(app.base, `/api/v1/commands/${protocolCommand.id}/events?format=json`, { headers: auth });
     assert.ok(eventsAfterResult.body.items.some((event) => event.type === 'result'));
@@ -1100,7 +1102,7 @@ test('subscription profiles protect defaults and delete custom profiles', async 
     });
     const hkAgent = await request(app.base, `/api/v1/agents/enroll/${hkNode.body.installId}`, {
       method: 'POST',
-      body: { version: '0.2.8-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
+      body: { version: '0.2.9-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
     });
     await request(app.base, `/api/v1/agents/${hkAgent.body.agentId}/metrics`, {
       method: 'POST',
@@ -1114,7 +1116,7 @@ test('subscription profiles protect defaults and delete custom profiles', async 
     });
     const usAgent = await request(app.base, `/api/v1/agents/enroll/${usNode.body.installId}`, {
       method: 'POST',
-      body: { version: '0.2.8-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
+      body: { version: '0.2.9-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
     });
     await request(app.base, `/api/v1/agents/${usAgent.body.agentId}/metrics`, {
       method: 'POST',

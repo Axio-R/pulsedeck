@@ -99,6 +99,7 @@ export interface PulseNode {
     latestVersion: string;
     runtimeAvailable: boolean;
     updateAvailable: boolean;
+    remoteUpdateSupported: boolean;
     update: {
       currentVersion?: string;
       latestVersion?: string;
