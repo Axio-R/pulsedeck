@@ -61,21 +61,21 @@ jobs:
             chmod +x "$dir/pulsedeck-agent"
             cp README.md LICENSE "$dir/"
             cat > "$dir/INSTALL.txt" <<EOF
-PulseDeck Agent ${VERSION} (${target})
+          PulseDeck Agent ${VERSION} (${target})
 
-Panel install command:
-  curl -fsSL https://YOUR_PANEL/api/v1/agents/install/YOUR_INSTALL_ID | sh
+          Panel install command:
+            curl -fsSL https://YOUR_PANEL/api/v1/agents/install/YOUR_INSTALL_ID | sh
 
-Manual run:
-  PULSEDECK_AGENT_CONFIG=/etc/pulsedeck/agent.json ./pulsedeck-agent menu
+          Manual run:
+            PULSEDECK_AGENT_CONFIG=/etc/pulsedeck/agent.json ./pulsedeck-agent menu
 
-Common commands:
-  ./pulsedeck-agent info
-  ./pulsedeck-agent install-service
-  ./pulsedeck-agent update-check
-  ./pulsedeck-agent update
-  ./pulsedeck-agent uninstall --yes
-EOF
+          Common commands:
+            ./pulsedeck-agent info
+            ./pulsedeck-agent install-service
+            ./pulsedeck-agent update-check
+            ./pulsedeck-agent update
+            ./pulsedeck-agent uninstall --yes
+          EOF
             tar -czf "dist/agent-release/${pkg}.tar.gz" -C dist "$pkg"
           }
           package linux-x64 x86_64-unknown-linux-musl

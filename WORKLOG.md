@@ -104,6 +104,9 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm build`: passed.
   - `cargo check --manifest-path apps/agent/Cargo.toml`: could not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
   - No local Docker image build was performed.
+- Post-push correction:
+  - The first pushed Agent release workflow failed before creating jobs because the `INSTALL.txt` heredoc content was not indented as valid YAML block scalar content.
+  - Fixed `.github/workflows/agent-release.yml` heredoc indentation and validated it locally with the repository YAML CLI.
 
 - Implementation direction for this turn:
   - Continue the remaining worklog items after command streaming and GeoIP/Geosite.
