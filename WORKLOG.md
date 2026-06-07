@@ -98,6 +98,30 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - Added subscription profile token reset, built-in profile hide/delete behavior, and built-in profile restore endpoint and UI actions.
   - Hid the standalone sing-box configuration page from the sidebar because protocol and maintenance controls now live in node management.
   - Bumped panel and Agent metadata to `0.2.14` / `0.2.14-rust`.
+- Local verification before commit:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 16 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `git diff --check`: passed after cleaning generated route typing whitespace.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+- Committed and pushed `3e039f5 Simplify node UI and subscription controls`, then tagged and pushed `v0.2.14`.
+- GitHub Actions and release:
+  - `main` panel image run `27095359067`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+  - Tag `v0.2.14` panel image run `27095372502`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+  - Tag `v0.2.14` Agent release run `27095372514`: completed successfully and published release assets.
+  - Published Agent release assets: `pulsedeck-agent-v0.2.14-linux-x64.tar.gz` 439277 bytes, `pulsedeck-agent-v0.2.14-linux-arm64.tar.gz` 412663 bytes, `pulsedeck-agent-v0.2.14-linux-armv7l.tar.gz` 408220 bytes, and `SHA256SUMS` 326 bytes.
+- Deployment after `v0.2.14`:
+  - `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+  - `docker compose up -d`: recreated and started `pulsedeck-panel`.
+  - `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed with `version: 0.2.14` and `agentVersion: 0.2.14-rust`.
+  - `GET /api/v1/agents/runtime/manifest/linux-x64`: passed with `version: 0.2.14-rust`, `sizeBytes: 909888`, and SHA-256 `d12246577a647448cce3558eb2055e520d184c1dabead2e57b587d3a9e2718b2`.
+- Post-deploy smoke passed:
+  - Created, reset, and deleted a temporary custom subscription Profile; token reset changed the URL and delete removed it.
+  - Hid and restored a built-in subscription Profile through the new default hide/restore flow.
+  - Real `hk` node reports `displayRegion: HK`, `ipMode: warp-v4-ipv6`, and no queued/running commands.
+  - Remotely updated the real `hk` Agent from `0.2.13-rust` to `0.2.14-rust`; command `6e4eab63-168a-4e42-91d3-cd78f421a294` succeeded.
 
 ### 2026-06-07 (`v0.2.13`)
 
