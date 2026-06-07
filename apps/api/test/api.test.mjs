@@ -128,8 +128,14 @@ test('node enrollment install script is LXC and Rust multi-arch aware', async ()
     assert.match(script.body, /linux-armv7l/);
     assert.match(script.body, /pulsedeck-agent/);
     assert.match(script.body, /runtime\/\$PULSEDECK_AGENT_TARGET/);
+    assert.match(script.body, /install_agent_binary/);
+    assert.match(script.body, /\.\$\.download|\.\$\$\.download/);
+    assert.match(script.body, /mv -f "\$next" "\$target"/);
+    assert.doesNotMatch(script.body, /download "\$PULSEDECK_BASE_URL\/api\/v1\/agents\/runtime\/\$PULSEDECK_AGENT_TARGET" "\$AGENT_BIN"/);
     assert.match(script.body, /systemd/);
+    assert.match(script.body, /systemctl restart pulsedeck-agent\.service/);
     assert.match(script.body, /openrc/);
+    assert.match(script.body, /rc-service pulsedeck-agent restart/);
     assert.match(script.body, /PK/);
     assert.match(script.body, /pk menu/);
     assert.match(script.body, /pk info/);

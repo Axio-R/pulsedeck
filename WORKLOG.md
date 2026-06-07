@@ -85,6 +85,19 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 
 ### 2026-06-07
 
+- Hotfix direction for Agent installer:
+  - A real node reinstall failed with `curl: (23) Failure writing output to destination` while downloading `/api/v1/agents/runtime/linux-x64` directly to `/var/lib/pulsedeck/bin/pulsedeck-agent`.
+  - Likely cause: reinstall/update path attempted to write over an existing Agent binary that was still executing.
+  - Change the installer to download the Agent binary to a same-directory temporary file and atomically replace the final binary path after the download completes.
+- Hotfix completed:
+  - Added `install_agent_binary` to the generated shell installer.
+  - The installer now downloads to `$AGENT_BIN.$$.download`, verifies the file is non-empty, marks it executable, backs up the old binary to `$AGENT_BIN.bak`, and then uses `mv -f` to replace the final Agent path.
+  - Changed systemd/OpenRC installer paths to restart the Agent service after replacing the binary, falling back to start when restart is unavailable.
+- Local verification for Agent installer hotfix:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 9 tests.
+  - `git diff --check`: passed.
+
 - Implementation direction for this turn:
   - Continue optimizing the Rust Agent local UX and node management panel after the traffic WebSocket deployment.
   - Redesign `pk menu` around operator actions: install/repair service, uninstall Agent, check/update Agent, inspect information, run once, logs, doctor, restart, stop, and config path.

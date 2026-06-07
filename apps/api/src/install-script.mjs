@@ -58,6 +58,7 @@ choose_tmp_dir() {
 download() {
   url="$1"
   out="$2"
+  rm -f "$out" >/dev/null 2>&1 || true
   if have curl; then
     curl -fsSL "$url" -o "$out"
   elif have wget; then
@@ -65,6 +66,38 @@ download() {
   else
     die "curl or wget is required."
   fi
+}
+
+install_agent_binary() {
+  url="$1"
+  target="$2"
+  next="$target.$$.download"
+  backup="$target.bak"
+  rm -f "$next" >/dev/null 2>&1 || true
+  download "$url" "$next" || {
+    rm -f "$next" >/dev/null 2>&1 || true
+    return 1
+  }
+  [ -s "$next" ] || {
+    rm -f "$next" >/dev/null 2>&1 || true
+    say "Downloaded Agent binary is empty."
+    return 1
+  }
+  chmod +x "$next" || {
+    rm -f "$next" >/dev/null 2>&1 || true
+    say "Cannot make downloaded Agent binary executable."
+    return 1
+  }
+  if [ -f "$target" ]; then
+    cp "$target" "$backup" >/dev/null 2>&1 || true
+  fi
+  mv -f "$next" "$target" || {
+    rm -f "$next" >/dev/null 2>&1 || true
+    say "Cannot replace Agent binary at $target."
+    return 1
+  }
+  chmod +x "$target" || return 1
+  return 0
 }
 
 agent_target() {
@@ -113,7 +146,8 @@ RestartSec=8
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl enable --now pulsedeck-agent.service >/dev/null 2>&1 || return 1
+    systemctl enable pulsedeck-agent.service >/dev/null 2>&1 || true
+    systemctl restart pulsedeck-agent.service >/dev/null 2>&1 || systemctl start pulsedeck-agent.service >/dev/null 2>&1 || return 1
     printf 'systemd\\n'
     return 0
   fi
@@ -130,7 +164,7 @@ export PULSEDECK_AGENT_CONFIG="$CONFIG_FILE"
 EOF
     chmod +x /etc/init.d/pulsedeck-agent || true
     rc-update add pulsedeck-agent default >/dev/null 2>&1 || true
-    rc-service pulsedeck-agent start >/dev/null 2>&1 || return 1
+    rc-service pulsedeck-agent restart >/dev/null 2>&1 || rc-service pulsedeck-agent start >/dev/null 2>&1 || return 1
     printf 'openrc\\n'
     return 0
   fi
@@ -158,8 +192,7 @@ say "Using Agent target: $PULSEDECK_AGENT_TARGET"
 
 mkdir -p "$BASE_DIR/bin" "$BASE_DIR/state" || die "Cannot create Agent directories."
 AGENT_BIN="$BASE_DIR/bin/pulsedeck-agent"
-download "$PULSEDECK_BASE_URL/api/v1/agents/runtime/$PULSEDECK_AGENT_TARGET" "$AGENT_BIN" || die "Cannot download PulseDeck Rust Agent binary for $PULSEDECK_AGENT_TARGET."
-chmod +x "$AGENT_BIN" || die "Cannot make Agent binary executable."
+install_agent_binary "$PULSEDECK_BASE_URL/api/v1/agents/runtime/$PULSEDECK_AGENT_TARGET" "$AGENT_BIN" || die "Cannot download and install PulseDeck Rust Agent binary for $PULSEDECK_AGENT_TARGET."
 
 if try_mkdir /etc/pulsedeck; then
   CONFIG_DIR=/etc/pulsedeck
