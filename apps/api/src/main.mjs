@@ -17,7 +17,9 @@ const DEFAULT_GEOIP_FILE = path.join(ROOT_DIR, 'geoip.json');
 const DEFAULT_GEOSITE_FILE = path.join(ROOT_DIR, 'geosite.json');
 const PORT = Number(process.env.PULSEDECK_PORT || 14770);
 const HOST = process.env.PULSEDECK_HOST || '0.0.0.0';
-const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.0';
+const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.1';
+const AGENT_VERSION = process.env.PULSEDECK_AGENT_VERSION || `${APP_VERSION}-rust`;
+const AGENT_RUNTIME_TARGETS = ['linux-x64', 'linux-arm64', 'linux-armv7l'];
 const ADMIN_USER = process.env.PULSEDECK_ADMIN_USER || 'admin';
 const ADMIN_PASSWORD = process.env.PULSEDECK_ADMIN_PASSWORD || 'change-me';
 
@@ -84,6 +86,43 @@ function publicBaseUrl(req) {
   const proto = String(req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim() || 'http';
   const host = String(req.headers['x-forwarded-host'] || req.headers.host || `127.0.0.1:${PORT}`).split(',')[0].trim();
   return `${proto}://${host}`;
+}
+
+function validAgentRuntimeTarget(target) {
+  return /^[a-z0-9_-]+$/i.test(target) && AGENT_RUNTIME_TARGETS.includes(target);
+}
+
+function agentRuntimeFile(target) {
+  return path.join(AGENT_RUNTIME_DIR, target, 'pulsedeck-agent');
+}
+
+function agentRuntimeMetadata(target, req) {
+  const base = publicBaseUrl(req);
+  const downloadUrl = `${base}/api/v1/agents/runtime/${encodeURIComponent(target)}`;
+  const metadata = {
+    target,
+    version: AGENT_VERSION,
+    appVersion: APP_VERSION,
+    available: false,
+    sizeBytes: 0,
+    sha256: '',
+    downloadUrl,
+    updatedAt: null
+  };
+
+  try {
+    const runtimeFile = agentRuntimeFile(target);
+    const info = statSync(runtimeFile);
+    const body = readFileSync(runtimeFile);
+    metadata.available = true;
+    metadata.sizeBytes = info.size;
+    metadata.sha256 = createHash('sha256').update(body).digest('hex');
+    metadata.updatedAt = info.mtime.toISOString();
+  } catch {
+    // Runtime binaries are produced by the GHCR build. Local dev servers can run without them.
+  }
+
+  return metadata;
 }
 
 function isRecent(iso, maxAgeMs = 180_000) {
@@ -1233,6 +1272,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
       status: 'ok',
       name: 'PulseDeck',
       version: APP_VERSION,
+      agentVersion: AGENT_VERSION,
       port: PORT,
       time: nowIso()
     });
@@ -1284,10 +1324,25 @@ async function handleApi(req, res, store, url, realtime = {}) {
     return sendSoy(res, { token, refreshToken });
   }
 
+  if (method === 'GET' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'agents' && segments[3] === 'runtime' && segments[4] === 'manifest') {
+    const target = segments[5] ? decodeURIComponent(segments[5]) : '';
+    if (target) {
+      if (!validAgentRuntimeTarget(target)) return badRequest(res, 'invalid agent target');
+      return sendJson(res, 200, agentRuntimeMetadata(target, req));
+    }
+    return sendJson(res, 200, {
+      appVersion: APP_VERSION,
+      agentVersion: AGENT_VERSION,
+      generatedAt: nowIso(),
+      targets: AGENT_RUNTIME_TARGETS.map((item) => agentRuntimeMetadata(item, req))
+    });
+  }
+
   if (method === 'GET' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'agents' && segments[3] === 'runtime' && segments[4]) {
     const target = decodeURIComponent(segments[4]);
-    if (!/^[a-z0-9_-]+$/i.test(target)) return badRequest(res, 'invalid agent target');
-    const runtimeFile = path.join(AGENT_RUNTIME_DIR, target, 'pulsedeck-agent');
+    if (!validAgentRuntimeTarget(target)) return badRequest(res, 'invalid agent target');
+    const runtimeFile = agentRuntimeFile(target);
+    const metadata = agentRuntimeMetadata(target, req);
     try {
       await stat(runtimeFile);
     } catch {
@@ -1295,7 +1350,10 @@ async function handleApi(req, res, store, url, realtime = {}) {
     }
     res.writeHead(200, {
       'content-type': 'application/octet-stream',
-      'cache-control': 'no-store'
+      'cache-control': 'no-store',
+      'content-length': String(metadata.sizeBytes),
+      'x-pulsedeck-agent-version': metadata.version,
+      'x-pulsedeck-agent-sha256': metadata.sha256
     });
     createReadStream(runtimeFile).pipe(res);
     return;

@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const VERSION: &str = "0.2.0-rust";
+const VERSION: &str = "0.2.1-rust";
 
 #[derive(Clone, Debug)]
 struct Config {
@@ -68,6 +68,16 @@ struct ApplyOutcome {
     config_path: String,
     restarted: bool,
     message: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RuntimeManifest {
+    version: String,
+    target: String,
+    available: bool,
+    size_bytes: u64,
+    sha256: String,
+    download_url: String,
 }
 
 fn main() {
@@ -714,17 +724,39 @@ fn stop_agent_service() -> Result<(), String> {
 fn update_check() -> Result<(), String> {
     let config = load_config()?;
     let target = agent_target();
-    let url = format!("{}/api/v1/agents/runtime/{}", config.base_url.trim_end_matches('/'), target);
-    let tmp_dir = Path::new(&config.agent_home).join("tmp");
-    fs::create_dir_all(&tmp_dir).map_err(|error| format!("cannot create temp dir: {error}"))?;
-    let tmp = tmp_dir.join(format!("pulsedeck-agent-update-check.{}", std::process::id()));
-    download_to(&url, &tmp.to_string_lossy())?;
-    let size = fs::metadata(&tmp).map(|meta| meta.len()).unwrap_or(0);
-    let _ = fs::remove_file(&tmp);
     println!("local version: {VERSION}");
     println!("target: {target}");
-    println!("runtime endpoint: {url}");
-    println!("latest runtime is downloadable: {size} bytes");
+
+    match fetch_runtime_manifest(&config, &target) {
+        Ok(manifest) if manifest.available => {
+            println!("panel runtime version: {}", blank_dash(&manifest.version));
+            println!("runtime endpoint: {}", runtime_download_url(&config, &target, Some(&manifest)));
+            println!("runtime size: {} bytes", manifest.size_bytes);
+            println!("runtime sha256: {}", blank_dash(&manifest.sha256));
+            if manifest.version == VERSION {
+                println!("status: local Agent matches the panel runtime version");
+            } else {
+                println!("status: update available");
+            }
+        }
+        Ok(manifest) => {
+            println!("panel runtime version: {}", blank_dash(&manifest.version));
+            println!("runtime endpoint: {}", runtime_download_url(&config, &target, Some(&manifest)));
+            println!("status: runtime binary is not published for this target yet");
+        }
+        Err(error) => {
+            let url = runtime_download_url(&config, &target, None);
+            let tmp_dir = Path::new(&config.agent_home).join("tmp");
+            fs::create_dir_all(&tmp_dir).map_err(|error| format!("cannot create temp dir: {error}"))?;
+            let tmp = tmp_dir.join(format!("pulsedeck-agent-update-check.{}", std::process::id()));
+            download_to(&url, &tmp.to_string_lossy())?;
+            let size = fs::metadata(&tmp).map(|meta| meta.len()).unwrap_or(0);
+            let _ = fs::remove_file(&tmp);
+            println!("runtime manifest unavailable: {error}");
+            println!("runtime endpoint: {url}");
+            println!("latest runtime is downloadable: {size} bytes");
+        }
+    }
     println!("run `pk update` to replace the local Agent binary");
     Ok(())
 }
@@ -771,14 +803,24 @@ fn update_self() -> Result<(), String> {
     let config = load_config()?;
     let current = env::current_exe().map_err(|error| format!("cannot resolve current executable: {error}"))?;
     let target = agent_target();
-    let url = format!("{}/api/v1/agents/runtime/{}", config.base_url.trim_end_matches('/'), target);
+    let manifest = fetch_runtime_manifest(&config, &target).ok();
+    let url = runtime_download_url(&config, &target, manifest.as_ref());
     let next = format!("{}.next", current.to_string_lossy());
     let backup = format!("{}.bak", current.to_string_lossy());
     download_to(&url, &next)?;
+    if let Some(manifest) = manifest.as_ref() {
+        if let Err(error) = verify_file_sha256(Path::new(&next), &manifest.sha256) {
+            let _ = fs::remove_file(&next);
+            return Err(error);
+        }
+    }
     make_executable(Path::new(&next))?;
     let _ = fs::copy(&current, &backup);
     fs::rename(&next, &current).map_err(|error| format!("cannot replace Agent binary: {error}"))?;
     println!("Agent binary updated. Backup: {backup}");
+    if let Some(manifest) = manifest.as_ref() {
+        println!("updated runtime version: {}", blank_dash(&manifest.version));
+    }
     Ok(())
 }
 
@@ -1045,6 +1087,56 @@ fn download_to(url: &str, target: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("download failed from {url}"))
+    }
+}
+
+fn fetch_runtime_manifest(config: &Config, target: &str) -> Result<RuntimeManifest, String> {
+    let raw = get_json(
+        config,
+        &format!("/api/v1/agents/runtime/manifest/{}", url_component(target)),
+        "",
+    )?;
+    let manifest = RuntimeManifest {
+        version: json_get_string(&raw, "version").unwrap_or_default(),
+        target: json_get_string(&raw, "target").unwrap_or_else(|| target.to_string()),
+        available: json_get_bool(&raw, "available").unwrap_or(false),
+        size_bytes: json_get_number(&raw, "sizeBytes").unwrap_or(0),
+        sha256: json_get_string(&raw, "sha256").unwrap_or_default(),
+        download_url: json_get_string(&raw, "downloadUrl").unwrap_or_default(),
+    };
+    if manifest.target != target {
+        return Err(format!("runtime manifest target mismatch: {}", manifest.target));
+    }
+    Ok(manifest)
+}
+
+fn runtime_download_url(config: &Config, target: &str, manifest: Option<&RuntimeManifest>) -> String {
+    if let Some(manifest) = manifest {
+        if !manifest.download_url.trim().is_empty() {
+            return manifest.download_url.clone();
+        }
+    }
+    format!("{}/api/v1/agents/runtime/{}", config.base_url.trim_end_matches('/'), target)
+}
+
+fn verify_file_sha256(file: &Path, expected: &str) -> Result<(), String> {
+    if expected.trim().is_empty() {
+        return Ok(());
+    }
+    let actual = file_sha256(file)?;
+    if actual.eq_ignore_ascii_case(expected.trim()) {
+        println!("runtime sha256 verified: {actual}");
+        Ok(())
+    } else {
+        Err(format!("runtime sha256 mismatch: expected {}, got {actual}", expected.trim()))
+    }
+}
+
+fn blank_dash(input: &str) -> &str {
+    if input.trim().is_empty() {
+        "-"
+    } else {
+        input
     }
 }
 

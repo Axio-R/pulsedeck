@@ -25,6 +25,33 @@ async function pulseFetch<T>(path: string, options: { method?: HttpMethod; body?
   return body as T;
 }
 
+export interface PulseHealth {
+  status: string;
+  name: string;
+  version: string;
+  agentVersion: string;
+  port: number;
+  time: string;
+}
+
+export interface PulseAgentRuntimeTarget {
+  target: string;
+  version: string;
+  appVersion: string;
+  available: boolean;
+  sizeBytes: number;
+  sha256: string;
+  downloadUrl: string;
+  updatedAt: string | null;
+}
+
+export interface PulseAgentRuntimeManifest {
+  appVersion: string;
+  agentVersion: string;
+  generatedAt: string;
+  targets: PulseAgentRuntimeTarget[];
+}
+
 export interface PulseNode {
   id: string;
   name: string;
@@ -243,6 +270,14 @@ export interface PulseAlertEvent {
 
 export function fetchPulseDashboard() {
   return pulseFetch<PulseDashboard>('/dashboard');
+}
+
+export function fetchPulseHealth() {
+  return pulseFetch<PulseHealth>('/health');
+}
+
+export function fetchPulseAgentRuntimeManifest() {
+  return pulseFetch<PulseAgentRuntimeManifest>('/agents/runtime/manifest');
 }
 
 export function fetchPulseNodes() {

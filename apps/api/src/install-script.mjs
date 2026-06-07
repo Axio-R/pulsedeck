@@ -68,9 +68,59 @@ download() {
   fi
 }
 
+download_text() {
+  url="$1"
+  if have curl; then
+    curl -fsSL "$url"
+  elif have wget; then
+    wget -qO- "$url"
+  else
+    die "curl or wget is required."
+  fi
+}
+
+json_string() {
+  key="$1"
+  sed -n "s/.*\\"$key\\"[[:space:]]*:[[:space:]]*\\"\\([^\\"]*\\)\\".*/\\1/p" | head -n 1
+}
+
+json_number() {
+  key="$1"
+  sed -n "s/.*\\"$key\\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p" | head -n 1
+}
+
+file_sha256() {
+  file="$1"
+  if have sha256sum; then
+    sha256sum "$file" | awk '{print $1}'
+  elif have shasum; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+verify_sha256() {
+  file="$1"
+  expected="$2"
+  [ -n "$expected" ] || return 0
+  actual="$(file_sha256 "$file" 2>/dev/null || true)"
+  if [ -z "$actual" ]; then
+    say "No SHA-256 tool found; skipping Agent checksum verification."
+    return 0
+  fi
+  if [ "$actual" != "$expected" ]; then
+    say "Agent checksum mismatch: expected $expected, got $actual."
+    return 1
+  fi
+  say "Agent checksum verified: $actual"
+  return 0
+}
+
 install_agent_binary() {
   url="$1"
   target="$2"
+  expected_sha="\${3:-}"
   next="$target.$$.download"
   backup="$target.bak"
   rm -f "$next" >/dev/null 2>&1 || true
@@ -81,6 +131,10 @@ install_agent_binary() {
   [ -s "$next" ] || {
     rm -f "$next" >/dev/null 2>&1 || true
     say "Downloaded Agent binary is empty."
+    return 1
+  }
+  verify_sha256 "$next" "$expected_sha" || {
+    rm -f "$next" >/dev/null 2>&1 || true
     return 1
   }
   chmod +x "$next" || {
@@ -190,9 +244,21 @@ say "Using Agent install directory: $BASE_DIR"
 say "Using Agent temp directory: $TMP_DIR"
 say "Using Agent target: $PULSEDECK_AGENT_TARGET"
 
+MANIFEST_JSON="$(download_text "$PULSEDECK_BASE_URL/api/v1/agents/runtime/manifest/$PULSEDECK_AGENT_TARGET" 2>/dev/null || true)"
+RUNTIME_VERSION="$(printf '%s\\n' "$MANIFEST_JSON" | json_string version)"
+RUNTIME_SIZE_BYTES="$(printf '%s\\n' "$MANIFEST_JSON" | json_number sizeBytes)"
+RUNTIME_SHA256="$(printf '%s\\n' "$MANIFEST_JSON" | json_string sha256)"
+if [ -n "$RUNTIME_VERSION" ] || [ -n "$RUNTIME_SIZE_BYTES" ]; then
+  display_version="$RUNTIME_VERSION"
+  display_size="$RUNTIME_SIZE_BYTES"
+  [ -n "$display_version" ] || display_version=unknown
+  [ -n "$display_size" ] || display_size=unknown
+  say "Agent runtime metadata: version $display_version, size $display_size bytes"
+fi
+
 mkdir -p "$BASE_DIR/bin" "$BASE_DIR/state" || die "Cannot create Agent directories."
 AGENT_BIN="$BASE_DIR/bin/pulsedeck-agent"
-install_agent_binary "$PULSEDECK_BASE_URL/api/v1/agents/runtime/$PULSEDECK_AGENT_TARGET" "$AGENT_BIN" || die "Cannot download and install PulseDeck Rust Agent binary for $PULSEDECK_AGENT_TARGET."
+install_agent_binary "$PULSEDECK_BASE_URL/api/v1/agents/runtime/$PULSEDECK_AGENT_TARGET" "$AGENT_BIN" "$RUNTIME_SHA256" || die "Cannot download and install PulseDeck Rust Agent binary for $PULSEDECK_AGENT_TARGET."
 
 if try_mkdir /etc/pulsedeck; then
   CONFIG_DIR=/etc/pulsedeck

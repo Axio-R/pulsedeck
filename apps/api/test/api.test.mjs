@@ -93,7 +93,35 @@ test('health reports PulseDeck on default product port', async () => {
     const { res, body } = await request(app.base, '/api/v1/health');
     assert.equal(res.status, 200);
     assert.equal(body.name, 'PulseDeck');
+    assert.equal(body.version, '0.2.1');
+    assert.equal(body.agentVersion, '0.2.1-rust');
     assert.equal(body.port, 14770);
+  } finally {
+    await app.close();
+  }
+});
+
+test('agent runtime manifest exposes target metadata', async () => {
+  const app = await startServer();
+  try {
+    const { res, body } = await request(app.base, '/api/v1/agents/runtime/manifest');
+    assert.equal(res.status, 200);
+    assert.equal(body.agentVersion, '0.2.1-rust');
+    assert.ok(Array.isArray(body.targets));
+    assert.deepEqual(
+      body.targets.map((target) => target.target),
+      ['linux-x64', 'linux-arm64', 'linux-armv7l']
+    );
+    const x64 = body.targets.find((target) => target.target === 'linux-x64');
+    assert.equal(typeof x64.available, 'boolean');
+    assert.equal(typeof x64.sizeBytes, 'number');
+    assert.equal(typeof x64.sha256, 'string');
+    assert.match(x64.downloadUrl, /\/api\/v1\/agents\/runtime\/linux-x64$/);
+
+    const single = await request(app.base, '/api/v1/agents/runtime/manifest/linux-x64');
+    assert.equal(single.res.status, 200);
+    assert.equal(single.body.target, 'linux-x64');
+    assert.equal(single.body.version, '0.2.1-rust');
   } finally {
     await app.close();
   }
@@ -131,6 +159,9 @@ test('node enrollment install script is LXC and Rust multi-arch aware', async ()
     assert.match(script.body, /install_agent_binary/);
     assert.match(script.body, /\.\$\.download|\.\$\$\.download/);
     assert.match(script.body, /mv -f "\$next" "\$target"/);
+    assert.match(script.body, /runtime\/manifest\/\$PULSEDECK_AGENT_TARGET/);
+    assert.match(script.body, /verify_sha256/);
+    assert.match(script.body, /Agent checksum verified/);
     assert.doesNotMatch(script.body, /download "\$PULSEDECK_BASE_URL\/api\/v1\/agents\/runtime\/\$PULSEDECK_AGENT_TARGET" "\$AGENT_BIN"/);
     assert.match(script.body, /systemd/);
     assert.match(script.body, /systemctl restart pulsedeck-agent\.service/);

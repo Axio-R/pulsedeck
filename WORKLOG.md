@@ -86,6 +86,25 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 ### 2026-06-07
 
 - Implementation direction for this turn:
+  - Continue remaining release/deployment work by making Agent runtime publishing observable and verifiable before cutting the next patch version.
+  - Add a panel runtime manifest, installer checksum verification, Agent update-check/update metadata, and a compact Settings UI view for release/runtime state.
+  - Prepare `v0.2.1` after verification, push through GitHub Actions/GHCR, redeploy by Compose pull/up, and smoke test the release.
+- Implementation completed before commit:
+  - Added `GET /api/v1/agents/runtime/manifest` and per-target manifest responses for `linux-x64`, `linux-arm64`, and `linux-armv7l`, including availability, size, SHA-256, download URL, panel version, and Agent version.
+  - Added Agent runtime version and SHA-256 headers to binary downloads.
+  - Updated the generated Agent installer to fetch runtime metadata, verify SHA-256 after downloading to the temporary replacement file, and only then atomically replace the installed Agent binary.
+  - Updated Rust Agent `pk update-check` to report panel runtime version, size, SHA-256, endpoint, and update status; updated `pk update` to verify SHA-256 before replacing the local binary.
+  - Reworked the Settings page into a compact runtime status panel with live health/version data and target download rows.
+  - Bumped panel and Agent metadata to `0.2.1` / `0.2.1-rust`.
+- Local verification before commit:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 11 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `git diff --check`: passed.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: could not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+
+- Implementation direction for this turn:
   - Continue remaining product work by closing the alerting loop.
   - Add offline detection, traffic-limit alert actions, alert event delivery state, event acknowledgement, and a compact Alerts UI event table.
   - Prepare a suitable `v0.2.0` release after verification, including version metadata and tagged GHCR image support.
