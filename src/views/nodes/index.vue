@@ -14,14 +14,24 @@ import {
   updatePulseNode,
   type PulseNode,
   type PulseProtocolMeta,
-  type PulseTrafficEvent
+  type PulseTrafficEvent,
+  type PulseTrafficNode
 } from '@/service/api';
 
+type ProtocolDraft = { type: string; port: number | null; listen: string; variant: string; settingsJson: string };
+type TrafficDraft = { thresholdGb: number | null; warningPercent: number; autoDisableSubscription: boolean; subscriptionEnabled: boolean };
+type TrafficSample = { time: number; rx: number; tx: number };
+type TrafficSocketState = 'connecting' | 'live' | 'reconnecting' | 'offline';
+
+const trafficHistoryLimit = 60;
 const loading = ref(false);
 const nodes = ref<PulseNode[]>([]);
 const protocolMetas = ref<PulseProtocolMeta[]>([]);
 const form = reactive({ name: '', region: '', tags: '' });
-const protocolDrafts = reactive<Record<string, { type: string; port: number | null; variant: string; settingsJson: string }>>({});
+const protocolDrafts = reactive<Record<string, ProtocolDraft>>({});
+const trafficDrafts = reactive<Record<string, TrafficDraft>>({});
+const trafficHistory = reactive<Record<string, TrafficSample[]>>({});
+const trafficSocketState = ref<TrafficSocketState>('connecting');
 const singBoxDrafts = reactive<Record<string, { version: string; downloadUrl: string; sha256: string }>>({});
 const installDrawerVisible = ref(false);
 const installDrawerNode = ref<PulseNode | null>(null);
@@ -113,7 +123,27 @@ async function loadData() {
     const [nodeRes, protocolRes] = await Promise.all([fetchPulseNodes(), fetchPulseProtocols()]);
     nodes.value = nodeRes.items;
     protocolMetas.value = protocolRes.items;
-    for (const node of nodes.value) draftFor(node);
+    for (const node of nodes.value) {
+      draftFor(node);
+      trafficDraftFor(node);
+      recordTrafficSample(
+        {
+          id: node.id,
+          name: node.name,
+          status: node.status,
+          agentStatus: node.agentStatus,
+          online: node.online,
+          lastSeenAt: node.lastSeenAt,
+          region: node.region,
+          displayRegion: node.displayRegion,
+          subscriptionEnabled: node.subscriptionEnabled,
+          metrics: node.metrics,
+          traffic: node.traffic,
+          network: node.network
+        },
+        Date.now()
+      );
+    }
   } finally {
     loading.value = false;
   }
@@ -189,8 +219,8 @@ function openInstallDrawer(node: PulseNode) {
 }
 
 async function queue(node: PulseNode, type: string) {
-  await queuePulseCommand(node.id, type);
-  window.$message?.success('命令已下发到队列');
+  const command = await queuePulseCommand(node.id, type);
+  window.$message?.success(`${commandLabel(command.type)} 已下发，可在命令队列查看输出`);
 }
 
 function singBoxDraftFor(node: PulseNode) {
@@ -226,6 +256,7 @@ function draftFor(node: PulseNode) {
     protocolDrafts[node.id] = {
       type: first?.type || 'vless',
       port: first?.defaultPort || 443,
+      listen: '0.0.0.0',
       variant: '',
       settingsJson: ''
     };
@@ -235,15 +266,22 @@ function draftFor(node: PulseNode) {
 
 function protocolOptions() {
   return protocolMetas.value.map(item => ({
-    label: `${item.name} :${item.defaultPort}`,
+    label: `${item.name} · 默认 :${item.defaultPort}`,
     value: item.type
   }));
+}
+
+function protocolVariantOptions(node: PulseNode) {
+  const draft = draftFor(node);
+  const meta = protocolMetas.value.find(item => item.type === draft.type);
+  return (meta?.variants || []).map(variant => ({ label: variant, value: variant }));
 }
 
 function syncDraftPort(node: PulseNode) {
   const draft = draftFor(node);
   const meta = protocolMetas.value.find(item => item.type === draft.type);
   draft.port = meta?.defaultPort || draft.port || 443;
+  draft.variant = meta?.variants?.[0] || draft.variant || '';
 }
 
 async function addProtocol(node: PulseNode) {
@@ -262,6 +300,7 @@ async function addProtocol(node: PulseNode) {
   const result = await createPulseNodeProtocol(node.id, {
     type: draft.type,
     port: draft.port,
+    listen: draft.listen,
     variant: draft.variant,
     settings
   });
@@ -280,6 +319,36 @@ async function saveRegion(node: PulseNode) {
   const result = await updatePulseNode(node.id, { region: node.region });
   Object.assign(node, result);
   window.$message?.success('区域已保存');
+}
+
+function trafficDraftFor(node: PulseNode) {
+  if (!trafficDrafts[node.id]) {
+    const thresholdBytes = Number(node.traffic?.thresholdBytes) || 0;
+    trafficDrafts[node.id] = {
+      thresholdGb: thresholdBytes > 0 ? Number((thresholdBytes / 1024 ** 3).toFixed(2)) : null,
+      warningPercent: Number(node.traffic?.warningPercent) || 80,
+      autoDisableSubscription: node.traffic?.autoDisableSubscription === true,
+      subscriptionEnabled: node.subscriptionEnabled === true
+    };
+  }
+  return trafficDrafts[node.id];
+}
+
+async function saveTrafficPolicy(node: PulseNode) {
+  const draft = trafficDraftFor(node);
+  const thresholdGb = Number(draft.thresholdGb) || 0;
+  const result = await updatePulseNode(node.id, {
+    subscriptionEnabled: draft.subscriptionEnabled,
+    traffic: {
+      thresholdBytes: thresholdGb > 0 ? Math.round(thresholdGb * 1024 ** 3) : 0,
+      warningPercent: draft.warningPercent,
+      autoDisableSubscription: draft.autoDisableSubscription
+    }
+  });
+  Object.assign(node, result);
+  delete trafficDrafts[node.id];
+  trafficDraftFor(node);
+  window.$message?.success('流量策略已保存');
 }
 
 function ipModeLabel(value?: string) {
@@ -308,6 +377,26 @@ function formatRate(value?: number) {
   return `${formatBytes(value)}/s`;
 }
 
+function displayNodeRegion(node: PulseNode) {
+  return node.displayRegion || node.region || '等待 Agent 上报';
+}
+
+function commandLabel(type: string) {
+  const labels: Record<string, string> = {
+    probe: '探测',
+    diagnostics: '诊断',
+    'sing-box-render': '渲染配置',
+    'sing-box-apply': '应用配置',
+    'sing-box-restart': '重启 sing-box',
+    'sing-box-install': '安装 sing-box',
+    'sing-box-reinstall': '更新 sing-box',
+    'reset-links': '重置链接',
+    'protocol-add': '添加协议',
+    'protocol-delete': '删除协议'
+  };
+  return labels[type] || type;
+}
+
 function protocolMode(protocol: PulseNode['protocols'][number]) {
   return [protocol.security, protocol.transport, protocol.variant].filter(Boolean).join(' / ') || 'tcp';
 }
@@ -327,9 +416,10 @@ function protocolBadges(protocol: PulseNode['protocols'][number]) {
   const badges = [
     protocol.enabled ? '启用' : '停用',
     `端口 ${protocol.port}`,
+    protocol.listen && protocol.listen !== '0.0.0.0' ? `监听 ${protocol.listen}` : '',
     `传输 ${transport || 'tcp'}`,
     security ? `安全 ${security}` : '明文'
-  ];
+  ].filter(Boolean);
   const sni = textSetting('serverName') || textSetting('sni');
   if (sni) badges.push(`SNI ${sni}`);
   const path = textSetting('path') || textSetting('wsPath') || textSetting('serviceName') || textSetting('service_name');
@@ -337,10 +427,82 @@ function protocolBadges(protocol: PulseNode['protocols'][number]) {
   return badges;
 }
 
+function recordTrafficSample(item: PulseTrafficNode, time: number) {
+  const samples = trafficHistory[item.id] || (trafficHistory[item.id] = []);
+  const rx = Number(item.traffic?.rxRateBytesPerSecond) || 0;
+  const tx = Number(item.traffic?.txRateBytesPerSecond) || 0;
+  const last = samples[samples.length - 1];
+  if (last && last.time === time) {
+    last.rx = rx;
+    last.tx = tx;
+  } else {
+    samples.push({ time, rx, tx });
+  }
+  if (samples.length > trafficHistoryLimit) samples.splice(0, samples.length - trafficHistoryLimit);
+}
+
+function trafficSamples(node: PulseNode) {
+  return trafficHistory[node.id] || [];
+}
+
+function trafficPeak(node: PulseNode) {
+  const peak = trafficSamples(node).reduce((max, sample) => Math.max(max, sample.rx, sample.tx), 0);
+  return peak > 0 ? peak : 1;
+}
+
+function trafficPath(node: PulseNode, direction: 'rx' | 'tx') {
+  const samples = trafficSamples(node);
+  if (samples.length < 2) return '';
+  const width = 240;
+  const height = 52;
+  const peak = trafficPeak(node);
+  return samples
+    .map((sample, index) => {
+      const x = (index / (samples.length - 1)) * width;
+      const y = height - (Math.max(0, sample[direction]) / peak) * height;
+      return `${x.toFixed(1)},${Math.max(0, Math.min(height, y)).toFixed(1)}`;
+    })
+    .join(' ');
+}
+
+function latestTrafficRate(node: PulseNode, direction: 'rx' | 'tx') {
+  return direction === 'rx' ? node.traffic?.rxRateBytesPerSecond : node.traffic?.txRateBytesPerSecond;
+}
+
+function trafficUsagePercent(node: PulseNode) {
+  const threshold = Number(node.traffic?.thresholdBytes) || 0;
+  if (threshold <= 0) return 0;
+  return Math.min(100, Math.round(((Number(node.traffic?.totalBytes) || 0) / threshold) * 1000) / 10);
+}
+
+function trafficUsageLabel(node: PulseNode) {
+  const threshold = Number(node.traffic?.thresholdBytes) || 0;
+  if (threshold <= 0) return '未设置阈值';
+  return `${trafficUsagePercent(node)}% / ${formatBytes(threshold)}`;
+}
+
+function trafficSocketTagType() {
+  if (trafficSocketState.value === 'live') return 'success';
+  if (trafficSocketState.value === 'connecting' || trafficSocketState.value === 'reconnecting') return 'warning';
+  return 'error';
+}
+
+function trafficSocketLabel() {
+  const labels: Record<TrafficSocketState, string> = {
+    connecting: '连接中',
+    live: '实时',
+    reconnecting: '重连中',
+    offline: '已断开'
+  };
+  return labels[trafficSocketState.value];
+}
+
 function applyTrafficEvent(event: PulseTrafficEvent) {
   if (event.type !== 'traffic.snapshot' || !event.items?.length) return;
+  const sampleTime = event.time ? Date.parse(event.time) || Date.now() : Date.now();
   for (const item of event.items) {
     const node = nodes.value.find(current => current.id === item.id);
+    recordTrafficSample(item, sampleTime);
     if (!node) continue;
     node.status = item.status;
     node.agentStatus = item.agentStatus;
@@ -357,6 +519,7 @@ function applyTrafficEvent(event: PulseTrafficEvent) {
 
 function scheduleTrafficReconnect() {
   if (!allowReconnect || reconnectTimer) return;
+  trafficSocketState.value = 'reconnecting';
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connectTrafficStream();
@@ -366,7 +529,11 @@ function scheduleTrafficReconnect() {
 function connectTrafficStream() {
   if (trafficSocket) trafficSocket.close();
   try {
+    trafficSocketState.value = 'connecting';
     trafficSocket = openPulseTrafficSocket();
+    trafficSocket.onopen = () => {
+      trafficSocketState.value = 'live';
+    };
     trafficSocket.onmessage = event => {
       try {
         applyTrafficEvent(JSON.parse(event.data) as PulseTrafficEvent);
@@ -374,7 +541,10 @@ function connectTrafficStream() {
         // Ignore malformed frames from interrupted connections.
       }
     };
-    trafficSocket.onclose = scheduleTrafficReconnect;
+    trafficSocket.onclose = () => {
+      trafficSocketState.value = allowReconnect ? 'reconnecting' : 'offline';
+      scheduleTrafficReconnect();
+    };
     trafficSocket.onerror = () => trafficSocket?.close();
   } catch {
     scheduleTrafficReconnect();
@@ -384,6 +554,9 @@ function connectTrafficStream() {
 async function removeNode(node: PulseNode) {
   const result = await deletePulseNode(node.id);
   nodes.value = nodes.value.filter(item => item.id !== node.id);
+  delete trafficHistory[node.id];
+  delete trafficDrafts[node.id];
+  delete protocolDrafts[node.id];
   window.$message?.success(`节点已删除，清理 Agent ${result.removedAgents} 个、命令 ${result.removedCommands} 条`);
 }
 
@@ -420,7 +593,10 @@ onUnmounted(() => {
 
     <NCard title="节点列表" :bordered="false" class="card-wrapper">
       <template #header-extra>
-        <NButton size="small" :loading="loading" @click="loadData">刷新</NButton>
+        <NSpace :size="8" align="center">
+          <NTag size="small" :type="trafficSocketTagType()" round>{{ trafficSocketLabel() }}</NTag>
+          <NButton size="small" :loading="loading" @click="loadData">刷新</NButton>
+        </NSpace>
       </template>
       <NDataTable :columns="columns" :data="nodes" :loading="loading" :bordered="false" />
     </NCard>
@@ -432,7 +608,7 @@ onUnmounted(() => {
             <div class="min-w-0">
               <div class="node-title">{{ node.name }}</div>
               <div class="node-subtitle">
-                {{ node.displayRegion || '自动识别中' }} · {{ node.network?.primaryIpv4 || node.network?.primaryIpv6 || '等待 Agent 上报' }}
+                {{ displayNodeRegion(node) }} · {{ node.network?.primaryIpv4 || node.network?.primaryIpv6 || '等待 Agent 上报' }}
               </div>
             </div>
             <NTag :type="node.online ? 'success' : 'warning'" size="small" round>{{ node.online ? '在线' : node.agentStatus }}</NTag>
@@ -462,6 +638,33 @@ onUnmounted(() => {
             <div class="metric-item">
               <span>订阅</span>
               <strong>{{ node.subscriptionEnabled ? '启用' : '停用' }}</strong>
+            </div>
+          </div>
+
+          <div class="traffic-panel">
+            <div class="traffic-head">
+              <div>
+                <div class="traffic-title">实时流量</div>
+                <div class="traffic-subtitle">峰值 {{ formatRate(trafficPeak(node)) }} · {{ trafficSamples(node).length }} 个样本</div>
+              </div>
+              <div class="traffic-rates">
+                <span class="rx">下行 {{ formatRate(latestTrafficRate(node, 'rx')) }}</span>
+                <span class="tx">上行 {{ formatRate(latestTrafficRate(node, 'tx')) }}</span>
+              </div>
+            </div>
+            <div class="traffic-chart">
+              <svg viewBox="0 0 240 52" preserveAspectRatio="none" aria-hidden="true">
+                <line x1="0" y1="51.5" x2="240" y2="51.5" class="axis-line" />
+                <polyline v-if="trafficPath(node, 'rx')" :points="trafficPath(node, 'rx')" class="traffic-line rx-line" />
+                <polyline v-if="trafficPath(node, 'tx')" :points="trafficPath(node, 'tx')" class="traffic-line tx-line" />
+              </svg>
+              <div v-if="trafficSamples(node).length < 2" class="traffic-empty">等待流量样本</div>
+            </div>
+            <div class="traffic-limit">
+              <div class="traffic-limit-bar">
+                <span :style="{ width: `${trafficUsagePercent(node)}%` }" />
+              </div>
+              <span>{{ trafficUsageLabel(node) }}</span>
             </div>
           </div>
 
@@ -512,13 +715,24 @@ onUnmounted(() => {
                 @update:value="syncDraftPort(node)"
               />
             </NGi>
-            <NGi span="12 s:5">
+            <NGi span="12 s:4">
               <NInputNumber v-model:value="draftFor(node).port" size="small" :min="1" :max="65535" placeholder="端口" class="w-full" />
             </NGi>
-            <NGi span="12 s:5">
-              <NInput v-model:value="draftFor(node).variant" size="small" placeholder="tls / reality / ws" />
+            <NGi span="12 s:4">
+              <NInput v-model:value="draftFor(node).listen" size="small" placeholder="监听" />
             </NGi>
-            <NGi span="24 s:6">
+            <NGi span="24 s:5">
+              <NSelect
+                v-model:value="draftFor(node).variant"
+                size="small"
+                :options="protocolVariantOptions(node)"
+                filterable
+                tag
+                clearable
+                placeholder="变体"
+              />
+            </NGi>
+            <NGi span="24 s:3">
               <NButton size="small" type="primary" block @click="addProtocol(node)">添加并推送</NButton>
             </NGi>
             <NGi span="24">
@@ -529,6 +743,44 @@ onUnmounted(() => {
                 :autosize="{ minRows: 1, maxRows: 3 }"
                 placeholder="高级设置 JSON"
               />
+            </NGi>
+          </NGrid>
+
+          <NDivider class="my-10px" />
+
+          <div class="section-head">
+            <NText strong>流量策略</NText>
+            <NText depth="3">{{ trafficUsageLabel(node) }}</NText>
+          </div>
+          <NGrid :x-gap="8" :y-gap="8" responsive="screen" item-responsive>
+            <NGi span="12 s:6">
+              <NInputNumber
+                v-model:value="trafficDraftFor(node).thresholdGb"
+                size="small"
+                :min="0"
+                :precision="2"
+                placeholder="阈值 GB"
+                class="w-full"
+              />
+            </NGi>
+            <NGi span="12 s:6">
+              <NInputNumber
+                v-model:value="trafficDraftFor(node).warningPercent"
+                size="small"
+                :min="1"
+                :max="100"
+                placeholder="预警 %"
+                class="w-full"
+              />
+            </NGi>
+            <NGi span="12 s:5">
+              <NCheckbox v-model:checked="trafficDraftFor(node).autoDisableSubscription">超限停订阅</NCheckbox>
+            </NGi>
+            <NGi span="12 s:4">
+              <NCheckbox v-model:checked="trafficDraftFor(node).subscriptionEnabled">订阅启用</NCheckbox>
+            </NGi>
+            <NGi span="24 s:3">
+              <NButton size="small" block secondary @click="saveTrafficPolicy(node)">保存</NButton>
             </NGi>
           </NGrid>
 
@@ -661,6 +913,124 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+.traffic-panel {
+  margin-top: 10px;
+  padding: 9px;
+  border: 1px solid rgba(96, 165, 250, 0.22);
+  border-radius: 6px;
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.08), rgba(16, 185, 129, 0.05));
+}
+
+.traffic-head,
+.traffic-limit {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.traffic-title {
+  color: var(--n-text-color, #1f2937);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 18px;
+}
+
+.traffic-subtitle,
+.traffic-limit span:last-child {
+  color: var(--n-text-color-disabled, #64748b);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.traffic-rates {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.traffic-rates span {
+  white-space: nowrap;
+}
+
+.traffic-rates .rx {
+  color: #2563eb;
+}
+
+.traffic-rates .tx {
+  color: #059669;
+}
+
+.traffic-chart {
+  position: relative;
+  height: 62px;
+  margin-top: 6px;
+  overflow: hidden;
+}
+
+.traffic-chart svg {
+  display: block;
+  width: 100%;
+  height: 52px;
+}
+
+.axis-line {
+  stroke: rgba(148, 163, 184, 0.32);
+  stroke-width: 1;
+}
+
+.traffic-line {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.rx-line {
+  stroke: #2563eb;
+}
+
+.tx-line {
+  stroke: #059669;
+}
+
+.traffic-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--n-text-color-disabled, #64748b);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.traffic-limit {
+  margin-top: 4px;
+}
+
+.traffic-limit-bar {
+  flex: 1;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.18);
+}
+
+.traffic-limit-bar span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2563eb, #059669);
+  transition: width 0.2s ease;
+}
+
 .section-head {
   display: flex;
   align-items: center;
@@ -730,6 +1100,16 @@ onUnmounted(() => {
   .protocol-row {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .traffic-head,
+  .traffic-limit {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .traffic-rates {
+    justify-content: flex-start;
   }
 }
 </style>

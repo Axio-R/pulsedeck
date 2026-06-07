@@ -304,7 +304,10 @@ export function resetPulseNodeLinks(id: string) {
   return pulseFetch<PulseCommand>(`/nodes/${id}/links/reset`, { method: 'POST' });
 }
 
-export function createPulseNodeProtocol(nodeId: string, body: { type: string; port?: number | null; variant?: string; name?: string; settings?: Record<string, unknown> }) {
+export function createPulseNodeProtocol(
+  nodeId: string,
+  body: { type: string; port?: number | null; listen?: string; variant?: string; name?: string; settings?: Record<string, unknown> }
+) {
   return pulseFetch<{ protocol: PulseNodeProtocol; command: PulseCommand }>(`/nodes/${nodeId}/protocols`, { method: 'POST', body });
 }
 

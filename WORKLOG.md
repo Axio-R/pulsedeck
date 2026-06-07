@@ -86,6 +86,29 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 ### 2026-06-07
 
 - Implementation direction for this turn:
+  - Perform a deeper panel/Agent operations pass without adding heavy dependencies.
+  - Add real-time node traffic usage charts from the existing traffic WebSocket.
+  - Make the dashboard show global live traffic trend and operational status instead of static-only counters.
+  - Expose per-node traffic threshold/subscription policy controls in the node card.
+  - Tighten node card protocol controls with visible variants, custom listen/port fields, and clearer command feedback.
+  - Make the command queue easier to read with Chinese command/status labels and failure result summaries.
+- Implementation completed before commit:
+  - Added per-node real-time traffic trend charts with RX/TX lines, live WebSocket connection state, latest rates, peak rate, sample count, and threshold usage bar.
+  - Added per-node traffic policy controls for threshold GB, warning percent, auto-disable subscription, and subscription enabled state.
+  - Added protocol variant options from protocol metadata, custom listen address input, clearer protocol option labels, and custom listen propagation to the API.
+  - Added global dashboard live traffic trend and compact RX/TX/total/peak summary from the existing traffic WebSocket.
+  - Replaced the static dashboard description with an operational online/total/queued summary.
+  - Improved node action toast copy so remote commands point operators to the command queue.
+  - Improved the command queue with Chinese command/status labels, shortened node/Agent identifiers, and result/failure summaries.
+  - Bumped panel and Agent metadata to `0.2.4` / `0.2.4-rust`.
+- Local verification before commit:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 11 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `git diff --check`: passed after cleaning the two known generated router-typing trailing spaces.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+- Implementation direction for this turn:
   - Address real VPS feedback after `0.2.2`: the install path works, but `pk` without arguments did not open an interactive menu, CPU usage stayed blank, region text stayed at an ambiguous auto-detect state, and command push failures were not self-explanatory in the panel.
   - Prepare a suitable `v0.2.3` patch release after verification and deployment.
 - Implementation completed before commit:
