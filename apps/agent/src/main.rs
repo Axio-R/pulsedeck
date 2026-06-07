@@ -1,7 +1,7 @@
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream, UdpSocket};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const VERSION: &str = "0.2.9-rust";
+const VERSION: &str = "0.2.10-rust";
 const DEFAULT_SING_BOX_VERSION: &str = "1.11.15";
 
 #[derive(Clone, Debug)]
@@ -851,6 +851,7 @@ fn collect_metrics_json() -> String {
 }
 
 fn collect_diagnostics_json(config: &Config) -> String {
+    let sing_box_binary = find_sing_box_binary_for(Some(config), None);
     let checks = vec![
         check_json("config-readable", Path::new(&config.config_path).is_file(), ""),
         check_json("state-dir-writable", writable_parent(&config.state_file), ""),
@@ -858,7 +859,7 @@ fn collect_diagnostics_json(config: &Config) -> String {
         check_json("curl-present", command_exists("curl"), ""),
         check_json("systemd-present", command_exists("systemctl"), ""),
         check_json("openrc-present", command_exists("rc-service"), ""),
-        check_json("sing-box-present", find_sing_box_binary().is_some(), &find_sing_box_binary().unwrap_or_default()),
+        check_json("sing-box-present", sing_box_binary.is_some(), &sing_box_binary.unwrap_or_default()),
         check_json("sing-box-workdir-writable", fs::create_dir_all(sing_box_work_dir(config)).is_ok(), ""),
         check_json("lxc-hints", lxc_hints(), ""),
     ];
@@ -918,8 +919,16 @@ fn info() -> Result<(), String> {
     println!("最后上报：{}", display_seen_at(&state.last_seen_at));
     println!("配置服务模式：{}", empty_dash(&config.service_mode));
     println!("服务状态：{}", service_status_summary());
-    println!("sing-box 程序：{}", find_sing_box_binary().unwrap_or_else(|| "-".to_string()));
-    println!("sing-box 版本：{}", sing_box_version().unwrap_or_else(|| "-".to_string()));
+    let sing_box_binary = find_sing_box_binary_for(Some(&config), None).unwrap_or_else(|| "-".to_string());
+    println!("sing-box 程序：{}", sing_box_binary);
+    println!(
+        "sing-box 版本：{}",
+        if sing_box_binary == "-" {
+            "-".to_string()
+        } else {
+            sing_box_version_for(&sing_box_binary).unwrap_or_else(|| "-".to_string())
+        }
+    );
     Ok(())
 }
 
@@ -1912,12 +1921,13 @@ fn absolute_url(config: &Config, endpoint: &str) -> String {
 
 fn render_sing_box_result(config: &Config, state: &State, agent_command: &AgentCommand) -> Result<String, String> {
     let rendered = render_sing_box_config(config, state, agent_command, false)?;
+    let binary = find_sing_box_binary_for(Some(config), Some(agent_command)).unwrap_or_default();
     Ok(format!(
         "{{\"message\":\"sing-box 配置已渲染\",\"agentVersion\":\"{}\",\"singBox\":{{\"installed\":{},\"version\":\"{}\",\"binaryPath\":\"{}\",\"configPath\":\"{}\",\"workDir\":\"{}\",\"status\":\"rendered\",\"lastRenderAt\":\"{}\"}},\"protocolCount\":{},\"previewLinks\":{}}}",
         json_escape(VERSION),
-        if find_sing_box_binary().is_some() { "true" } else { "false" },
-        json_escape(&sing_box_version().unwrap_or_default()),
-        json_escape(&find_sing_box_binary().unwrap_or_default()),
+        if binary.is_empty() { "false" } else { "true" },
+        json_escape(&sing_box_version_for(&binary).unwrap_or_default()),
+        json_escape(&binary),
         json_escape(&rendered.config_path),
         json_escape(&rendered.work_dir),
         json_escape(&now_string()),
@@ -1927,11 +1937,9 @@ fn render_sing_box_result(config: &Config, state: &State, agent_command: &AgentC
 }
 
 fn render_and_apply_sing_box(config: &Config, state: &State, agent_command: &AgentCommand) -> Result<String, String> {
-    if find_sing_box_binary().is_none() {
-        return Err("未找到 sing-box 可执行文件；请先下发 sing-box 安装命令或手动安装".to_string());
-    }
     let rendered = render_sing_box_config(config, state, agent_command, true)?;
-    let applied = apply_sing_box_config(&rendered.config_path)?;
+    let applied = apply_sing_box_config(config, agent_command, &rendered.config_path)?;
+    save_sing_box_state(config, &applied.binary_path, &applied.version, &applied.config_path, &applied.message);
     Ok(format!(
         "{{\"message\":\"{}\",\"agentVersion\":\"{}\",\"reportedLinks\":{},\"singBox\":{{\"installed\":true,\"version\":\"{}\",\"binaryPath\":\"{}\",\"configPath\":\"{}\",\"workDir\":\"{}\",\"serviceMode\":\"{}\",\"status\":\"applied\",\"message\":\"{}\",\"lastRenderAt\":\"{}\",\"lastApplyAt\":\"{}\",\"lastRestartAt\":{},\"updatedAt\":\"{}\"}},\"protocolCount\":{},\"applied\":true,\"serviceRestarted\":{}}}",
         json_escape(&applied.message),
@@ -1957,9 +1965,10 @@ fn render_and_apply_sing_box(config: &Config, state: &State, agent_command: &Age
 }
 
 fn restart_sing_box_result(config: &Config) -> Result<String, String> {
-    let binary = find_sing_box_binary().ok_or_else(|| "未找到 sing-box 可执行文件".to_string())?;
-    let version = sing_box_version().unwrap_or_default();
+    let binary = require_sing_box_binary(config, None)?;
+    let version = sing_box_version_for(&binary).unwrap_or_default();
     let restart = restart_sing_box_service();
+    save_sing_box_state(config, &binary, &version, "", &restart.1);
     Ok(format!(
         "{{\"message\":\"{}\",\"agentVersion\":\"{}\",\"singBox\":{{\"installed\":true,\"version\":\"{}\",\"binaryPath\":\"{}\",\"serviceMode\":\"{}\",\"status\":\"{}\",\"message\":\"{}\",\"lastRestartAt\":{},\"updatedAt\":\"{}\"}},\"serviceRestarted\":{}}}",
         json_escape(&restart.1),
@@ -1981,7 +1990,9 @@ fn restart_sing_box_result(config: &Config) -> Result<String, String> {
 
 fn install_or_update_sing_box(config: &Config, agent_command: &AgentCommand, reinstall: bool) -> Result<String, String> {
     if !reinstall {
-        if let Some(binary) = find_sing_box_binary() {
+        if let Some(binary) = find_sing_box_binary_for(Some(config), Some(agent_command)) {
+            let version = sing_box_version_for(&binary).unwrap_or_default();
+            save_sing_box_state(config, &binary, &version, "", "sing-box 已安装");
             return Ok(sing_box_install_result(config, &binary, "sing-box 已安装"));
         }
     }
@@ -2016,6 +2027,9 @@ fn install_or_update_sing_box(config: &Config, agent_command: &AgentCommand, rei
     verify_sing_box_binary(&target)?;
     let service = ensure_sing_box_service(config, &target);
     let message = format!("sing-box 程序已安装；{}", service.1);
+    let target_string = target.to_string_lossy().to_string();
+    let version = sing_box_version_for(&target_string).unwrap_or_default();
+    save_sing_box_state(config, &target_string, &version, &default_sing_box_apply_config_path(config), &message);
     Ok(sing_box_install_result(config, &target.to_string_lossy(), &message))
 }
 
@@ -2083,11 +2097,12 @@ fn default_sing_box_apply_config_path(config: &Config) -> String {
 
 fn sing_box_install_result(config: &Config, binary: &str, message: &str) -> String {
     format!(
-        "{{\"message\":\"{}\",\"agentVersion\":\"{}\",\"singBox\":{{\"installed\":true,\"version\":\"{}\",\"binaryPath\":\"{}\",\"workDir\":\"{}\",\"serviceMode\":\"{}\",\"status\":\"installed\",\"message\":\"{}\",\"updatedAt\":\"{}\"}}}}",
+        "{{\"message\":\"{}\",\"agentVersion\":\"{}\",\"singBox\":{{\"installed\":true,\"version\":\"{}\",\"binaryPath\":\"{}\",\"configPath\":\"{}\",\"workDir\":\"{}\",\"serviceMode\":\"{}\",\"status\":\"installed\",\"message\":\"{}\",\"updatedAt\":\"{}\"}}}}",
         json_escape(message),
         json_escape(VERSION),
-        json_escape(&sing_box_version().unwrap_or_default()),
+        json_escape(&sing_box_version_for(binary).unwrap_or_default()),
         json_escape(binary),
+        json_escape(&default_sing_box_apply_config_path(config)),
         json_escape(&sing_box_work_dir(config).to_string_lossy()),
         json_escape(&config.service_mode),
         json_escape(message),
@@ -2106,7 +2121,9 @@ fn render_sing_box_config(config: &Config, state: &State, agent_command: &AgentC
     let config_json = sing_box_config_json(&enabled, &secret)?;
     let config_path = select_sing_box_config_path(config, agent_command, apply_target);
     if apply_target {
-        atomic_write_checked_sing_box(&config_path, &config_json)?;
+        validate_protocol_ports(config, &enabled)?;
+        let binary = require_sing_box_binary(config, Some(agent_command))?;
+        atomic_write_checked_sing_box(&config_path, &config_json, &binary)?;
     } else {
         atomic_write(&config_path, &config_json)?;
     }
@@ -2321,9 +2338,9 @@ fn protocol_tls_json(protocol: &NodeProtocol, secret: &str) -> Result<String, St
     Ok(format!(",\"tls\":{{{}}}", fields.join(",")))
 }
 
-fn apply_sing_box_config(config_path: &str) -> Result<ApplyOutcome, String> {
-    let binary = find_sing_box_binary().ok_or_else(|| "未找到 sing-box 可执行文件；请先下发 sing-box 安装命令或手动安装".to_string())?;
-    let version = sing_box_version().unwrap_or_default();
+fn apply_sing_box_config(config: &Config, agent_command: &AgentCommand, config_path: &str) -> Result<ApplyOutcome, String> {
+    let binary = require_sing_box_binary(config, Some(agent_command))?;
+    let version = sing_box_version_for(&binary).unwrap_or_default();
     let check = Command::new(&binary)
         .args(["check", "-c", config_path])
         .output()
@@ -2703,42 +2720,190 @@ fn json_get_bool(raw: &str, key: &str) -> Option<bool> {
     }
 }
 
-fn find_sing_box_binary() -> Option<String> {
-    if let Ok(path) = env::var("PULSEDECK_SING_BOX_BIN") {
-        if Path::new(&path).is_file() {
-            return Some(path);
+fn validate_protocol_ports(config: &Config, protocols: &[NodeProtocol]) -> Result<(), String> {
+    let mut errors = Vec::new();
+    let mut usage: Vec<(String, u16, String)> = Vec::new();
+    for protocol in protocols.iter().filter(|protocol| protocol.enabled && protocol.port > 0) {
+        for network in protocol_networks(protocol) {
+            usage.push((network.to_string(), protocol.port, protocol_display_name(&protocol.kind).to_string()));
         }
     }
-    if let Some(path) = installed_sing_box_path() {
-        return Some(path);
-    }
-    if let Some(path) = find_command_path("sing-box") {
-        return Some(path);
-    }
-    for path in ["/usr/local/bin/sing-box", "/usr/bin/sing-box", "/opt/sing-box/sing-box"] {
-        if Path::new(path).is_file() {
-            return Some(path.to_string());
+
+    for (index, (network, port, protocol_name)) in usage.iter().enumerate() {
+        let duplicates = usage
+            .iter()
+            .skip(index + 1)
+            .filter(|(other_network, other_port, _)| other_network == network && other_port == port)
+            .map(|(_, _, other_name)| other_name.clone())
+            .collect::<Vec<String>>();
+        if !duplicates.is_empty() {
+            let mut names = vec![protocol_name.clone()];
+            names.extend(duplicates);
+            errors.push(format!("端口 {}/{} 被多个协议共用：{}", port, network.to_uppercase(), names.join("、")));
         }
     }
-    None
+
+    let current_ports = current_protocol_port_keys(config);
+    let mut checked = Vec::new();
+    for (network, port, protocol_name) in usage {
+        let key = format!("{network}:{port}");
+        if checked.iter().any(|item| item == &key) || current_ports.iter().any(|item| item == &key) {
+            continue;
+        }
+        checked.push(key);
+        if port_in_use(&network, port) {
+            errors.push(format!("端口 {}/{} 已被其他进程占用（协议 {}）", port, network.to_uppercase(), protocol_name));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("协议端口检查失败：{}", errors.join("；")))
+    }
 }
 
-fn installed_sing_box_path() -> Option<String> {
-    if let Ok(home) = env::var("PULSEDECK_AGENT_HOME") {
-        let path = Path::new(&home).join("bin/sing-box");
-        if path.is_file() {
-            return Some(path.to_string_lossy().to_string());
+fn protocol_networks(protocol: &NodeProtocol) -> Vec<&'static str> {
+    match protocol.kind.as_str() {
+        "hysteria2" | "tuic" => vec!["udp"],
+        "shadowsocks" => vec!["tcp", "udp"],
+        _ => vec!["tcp"],
+    }
+}
+
+fn current_protocol_port_keys(config: &Config) -> Vec<String> {
+    load_protocols_state(config)
+        .into_iter()
+        .filter(|protocol| protocol.enabled && protocol.port > 0)
+        .flat_map(|protocol| {
+            protocol_networks(&protocol)
+                .into_iter()
+                .map(move |network| format!("{network}:{}", protocol.port))
+        })
+        .collect()
+}
+
+fn port_in_use(network: &str, port: u16) -> bool {
+    let address = format!("0.0.0.0:{port}");
+    match network {
+        "tcp" => TcpListener::bind(&address).map(|listener| drop(listener)).is_err(),
+        "udp" => UdpSocket::bind(&address).map(|socket| drop(socket)).is_err(),
+        _ => false,
+    }
+}
+
+fn find_sing_box_binary() -> Option<String> {
+    find_sing_box_binary_for(None, None)
+}
+
+fn find_sing_box_binary_for(config: Option<&Config>, agent_command: Option<&AgentCommand>) -> Option<String> {
+    candidate_sing_box_binaries(config, agent_command)
+        .into_iter()
+        .find(|path| valid_sing_box_binary(path))
+}
+
+fn require_sing_box_binary(config: &Config, agent_command: Option<&AgentCommand>) -> Result<String, String> {
+    let candidates = candidate_sing_box_binaries(Some(config), agent_command);
+    for path in &candidates {
+        if valid_sing_box_binary(path) {
+            return Ok(path.clone());
         }
     }
-    let config_path = find_config_path();
-    let raw = fs::read_to_string(&config_path).unwrap_or_default();
-    let agent_home = json_get_string(&raw, "agentHome").unwrap_or_else(|| parent_parent(&config_path));
-    let path = Path::new(&agent_home).join("bin/sing-box");
-    if path.is_file() {
-        Some(path.to_string_lossy().to_string())
+    let checked = if candidates.is_empty() {
+        "没有候选路径".to_string()
     } else {
-        None
+        candidates.join(", ")
+    };
+    Err(format!(
+        "未找到可运行的 sing-box 可执行文件；已检查：{checked}。请先下发 sing-box 安装/更新命令，或配置 PULSEDECK_SING_BOX_BIN。"
+    ))
+}
+
+fn candidate_sing_box_binaries(config: Option<&Config>, agent_command: Option<&AgentCommand>) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Ok(path) = env::var("PULSEDECK_SING_BOX_BIN") {
+        push_candidate(&mut candidates, path);
     }
+    if let Some(command) = agent_command {
+        push_command_sing_box_candidates(&mut candidates, &command.payload_json);
+        push_command_sing_box_candidates(&mut candidates, &command.node_json);
+    }
+    if let Some(config) = config {
+        push_candidate(&mut candidates, read_sing_box_state_field(config, "binaryPath").unwrap_or_default());
+        push_candidate(&mut candidates, Path::new(&config.agent_home).join("bin/sing-box").to_string_lossy().to_string());
+    }
+    if let Ok(home) = env::var("PULSEDECK_AGENT_HOME") {
+        push_candidate(&mut candidates, Path::new(&home).join("bin/sing-box").to_string_lossy().to_string());
+    }
+    if config.is_none() {
+        let config_path = find_config_path();
+        let raw = fs::read_to_string(&config_path).unwrap_or_default();
+        let agent_home = json_get_string(&raw, "agentHome").unwrap_or_else(|| parent_parent(&config_path));
+        push_candidate(&mut candidates, Path::new(&agent_home).join("bin/sing-box").to_string_lossy().to_string());
+    }
+    for path in [
+        "/usr/local/bin/sing-box",
+        "/usr/bin/sing-box",
+        "/usr/sbin/sing-box",
+        "/opt/sing-box/sing-box",
+        "/var/lib/pulsedeck/bin/sing-box",
+    ] {
+        push_candidate(&mut candidates, path.to_string());
+    }
+    if let Some(path) = find_command_path("sing-box") {
+        push_candidate(&mut candidates, path);
+    }
+    candidates
+}
+
+fn push_command_sing_box_candidates(candidates: &mut Vec<String>, raw: &str) {
+    push_candidate(candidates, json_get_string(raw, "binaryPath").unwrap_or_default());
+    if let Some(sing_box) = json_get_value(raw, "singBox") {
+        push_candidate(candidates, json_get_string(&sing_box, "binaryPath").unwrap_or_default());
+    }
+}
+
+fn push_candidate(candidates: &mut Vec<String>, path: String) {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || candidates.iter().any(|candidate| candidate == trimmed) {
+        return;
+    }
+    candidates.push(trimmed.to_string());
+}
+
+fn valid_sing_box_binary(path: &str) -> bool {
+    !path.trim().is_empty() && Path::new(path).is_file() && sing_box_version_for(path).is_some()
+}
+
+fn sing_box_state_file(config: &Config) -> PathBuf {
+    Path::new(&config.state_file)
+        .parent()
+        .unwrap_or_else(|| Path::new(&config.agent_home))
+        .join("sing-box.json")
+}
+
+fn read_sing_box_state_field(config: &Config, key: &str) -> Option<String> {
+    let raw = fs::read_to_string(sing_box_state_file(config)).ok()?;
+    json_get_string(&raw, key)
+}
+
+fn save_sing_box_state(config: &Config, binary: &str, version: &str, config_path: &str, message: &str) {
+    let selected_config_path = if config_path.trim().is_empty() {
+        read_sing_box_state_field(config, "configPath").unwrap_or_else(|| default_sing_box_apply_config_path(config))
+    } else {
+        config_path.to_string()
+    };
+    let body = format!(
+        "{{\"installed\":true,\"version\":\"{}\",\"binaryPath\":\"{}\",\"configPath\":\"{}\",\"workDir\":\"{}\",\"serviceMode\":\"{}\",\"message\":\"{}\",\"updatedAt\":\"{}\"}}\n",
+        json_escape(version),
+        json_escape(binary),
+        json_escape(&selected_config_path),
+        json_escape(&sing_box_work_dir(config).to_string_lossy()),
+        json_escape(&config.service_mode),
+        json_escape(message),
+        json_escape(&now_string())
+    );
+    let _ = atomic_write(&sing_box_state_file(config).to_string_lossy(), &body);
 }
 
 fn find_command_path(name: &str) -> Option<String> {
@@ -2752,6 +2917,13 @@ fn find_command_path(name: &str) -> Option<String> {
 
 fn sing_box_version() -> Option<String> {
     let binary = find_sing_box_binary()?;
+    sing_box_version_for(&binary)
+}
+
+fn sing_box_version_for(binary: &str) -> Option<String> {
+    if binary.trim().is_empty() {
+        return None;
+    }
     let output = Command::new(binary).arg("version").output().ok()?;
     if !output.status.success() {
         return None;
@@ -2773,8 +2945,7 @@ fn atomic_write(file: &str, content: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn atomic_write_checked_sing_box(file: &str, content: &str) -> Result<(), String> {
-    let binary = find_sing_box_binary().ok_or_else(|| "sing-box binary was not found".to_string())?;
+fn atomic_write_checked_sing_box(file: &str, content: &str, binary: &str) -> Result<(), String> {
     let check_file = format!("{}.{}.check", file, std::process::id());
     let target = Path::new(file);
     ensure_parent(target)?;

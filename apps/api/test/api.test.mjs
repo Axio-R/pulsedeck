@@ -4,10 +4,12 @@ import path from 'node:path';
 import test from 'node:test';
 import { createPulseDeckServer } from '../src/main.mjs';
 
-async function startServer() {
+async function startServer(seedData = null) {
   const dir = path.join('/tmp', `pulsedeck-api-test-${process.pid}-${Date.now()}`);
   await mkdir(dir, { recursive: true });
-  const server = await createPulseDeckServer({ dataFile: path.join(dir, 'data.json') });
+  const dataFile = path.join(dir, 'data.json');
+  if (seedData) await writeFile(dataFile, `${JSON.stringify(seedData, null, 2)}\n`, 'utf8');
+  const server = await createPulseDeckServer({ dataFile });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
   return {
@@ -94,8 +96,8 @@ test('health reports PulseDeck on default product port', async () => {
     const { res, body } = await request(app.base, '/api/v1/health');
     assert.equal(res.status, 200);
     assert.equal(body.name, 'PulseDeck');
-    assert.equal(body.version, '0.2.9');
-    assert.equal(body.agentVersion, '0.2.9-rust');
+    assert.equal(body.version, '0.2.10');
+    assert.equal(body.agentVersion, '0.2.10-rust');
     assert.equal(body.port, 14770);
   } finally {
     await app.close();
@@ -107,7 +109,7 @@ test('agent runtime manifest exposes target metadata', async () => {
   try {
     const { res, body } = await request(app.base, '/api/v1/agents/runtime/manifest');
     assert.equal(res.status, 200);
-    assert.equal(body.agentVersion, '0.2.9-rust');
+    assert.equal(body.agentVersion, '0.2.10-rust');
     assert.ok(Array.isArray(body.targets));
     assert.deepEqual(
       body.targets.map((target) => target.target),
@@ -122,7 +124,7 @@ test('agent runtime manifest exposes target metadata', async () => {
     const single = await request(app.base, '/api/v1/agents/runtime/manifest/linux-x64');
     assert.equal(single.res.status, 200);
     assert.equal(single.body.target, 'linux-x64');
-    assert.equal(single.body.version, '0.2.9-rust');
+    assert.equal(single.body.version, '0.2.10-rust');
   } finally {
     await app.close();
   }
@@ -291,6 +293,80 @@ test('created nodes can be deleted with related commands purged', async () => {
   }
 });
 
+test('command history pruning keeps active commands and caps completed history', async () => {
+  const timestamp = '2026-06-07T00:00:00.000Z';
+  const commands = [
+    ...Array.from({ length: 1005 }, (_, index) => ({
+      id: `done-${index}`,
+      nodeId: 'node-history',
+      agentId: 'agent-history',
+      type: 'probe',
+      payload: {},
+      status: 'succeeded',
+      result: { ok: true },
+      createdAt: new Date(Date.parse(timestamp) + index * 1000).toISOString(),
+      updatedAt: new Date(Date.parse(timestamp) + index * 1000).toISOString()
+    })),
+    ...Array.from({ length: 2 }, (_, index) => ({
+      id: `active-${index}`,
+      nodeId: 'node-history',
+      agentId: 'agent-history',
+      type: 'probe',
+      payload: {},
+      status: index === 0 ? 'queued' : 'running',
+      result: null,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    }))
+  ];
+  const commandEvents = commands.map((command, index) => ({
+    id: `event-${index}`,
+    commandId: command.id,
+    nodeId: command.nodeId,
+    agentId: command.agentId,
+    type: 'state',
+    stream: 'state',
+    message: command.status,
+    payload: { status: command.status },
+    sequence: 1,
+    createdAt: command.createdAt
+  }));
+  const app = await startServer({
+    version: 1,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    sessions: [],
+    nodes: [],
+    agents: [],
+    commands,
+    commandEvents,
+    alertEvents: [],
+    trafficHistory: [],
+    subscriptionProfiles: []
+  });
+  try {
+    const login = await request(app.base, '/api/v1/auth/login', {
+      method: 'POST',
+      body: { username: 'admin', password: 'change-me' }
+    });
+    const auth = { authorization: `Bearer ${login.body.token}` };
+    const listed = await request(app.base, '/api/v1/commands', { headers: auth });
+    assert.equal(listed.res.status, 200);
+    assert.equal(listed.body.items.filter((item) => item.status === 'succeeded').length, 1000);
+    assert.equal(listed.body.items.filter((item) => ['queued', 'running'].includes(item.status)).length, 2);
+    assert.equal(listed.body.items.some((item) => item.id === 'done-0'), false);
+    assert.equal(listed.body.items.some((item) => item.id === 'done-1004'), true);
+
+    const prunedEvents = await request(app.base, '/api/v1/commands/done-0/events?format=json', { headers: auth });
+    assert.equal(prunedEvents.res.status, 404);
+    const activeEvents = await request(app.base, '/api/v1/commands/active-0/events?format=json', { headers: auth });
+    assert.equal(activeEvents.res.status, 200);
+    assert.equal(activeEvents.body.items.length, 1);
+  } finally {
+    await app.close();
+  }
+});
+
 test('nodes support automatic network discovery, protocol commands, and link reset', async () => {
   const app = await startServer();
   try {
@@ -339,7 +415,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.equal(discovered.displayRegion, 'GeoIP 未配置');
     assert.equal(discovered.agent.version, '0.1.0-rust');
     assert.equal(discovered.agent.target, 'linux-x64');
-    assert.equal(discovered.agent.latestVersion, '0.2.9-rust');
+    assert.equal(discovered.agent.latestVersion, '0.2.10-rust');
     assert.equal(discovered.agent.updateAvailable, true);
     assert.equal(discovered.agent.remoteUpdateSupported, false);
 
@@ -384,7 +460,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     await request(app.base, `/api/v1/agents/enroll/${warpNode.body.installId}`, {
       method: 'POST',
       body: {
-        version: '0.2.9-rust',
+        version: '0.2.10-rust',
         platform: 'linux',
         arch: 'x86_64',
         installDir: '/var/lib/pulsedeck',
@@ -515,7 +591,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
               status: 'update-available',
               target: 'linux-x64',
               currentVersion: '0.1.0-rust',
-              latestVersion: '0.2.9-rust',
+              latestVersion: '0.2.10-rust',
               available: true,
               updateAvailable: true
             }
@@ -528,7 +604,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     const withAgentUpdate = listedAfterAgentCheck.body.items.find((node) => node.id === created.body.id);
     assert.equal(withAgentUpdate.agent.update.status, 'update-available');
     assert.equal(withAgentUpdate.agent.update.updateAvailable, true);
-    assert.equal(withAgentUpdate.agent.update.latestVersion, '0.2.9-rust');
+    assert.equal(withAgentUpdate.agent.update.latestVersion, '0.2.10-rust');
 
     const eventsAfterResult = await request(app.base, `/api/v1/commands/${protocolCommand.id}/events?format=json`, { headers: auth });
     assert.ok(eventsAfterResult.body.items.some((event) => event.type === 'result'));
@@ -1102,7 +1178,7 @@ test('subscription profiles protect defaults and delete custom profiles', async 
     });
     const hkAgent = await request(app.base, `/api/v1/agents/enroll/${hkNode.body.installId}`, {
       method: 'POST',
-      body: { version: '0.2.9-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
+      body: { version: '0.2.10-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
     });
     await request(app.base, `/api/v1/agents/${hkAgent.body.agentId}/metrics`, {
       method: 'POST',
@@ -1116,7 +1192,7 @@ test('subscription profiles protect defaults and delete custom profiles', async 
     });
     const usAgent = await request(app.base, `/api/v1/agents/enroll/${usNode.body.installId}`, {
       method: 'POST',
-      body: { version: '0.2.9-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
+      body: { version: '0.2.10-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
     });
     await request(app.base, `/api/v1/agents/${usAgent.body.agentId}/metrics`, {
       method: 'POST',

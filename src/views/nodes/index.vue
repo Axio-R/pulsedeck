@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, h, onMounted, onUnmounted, reactive, ref } from 'vue';
-import { NButton, NPopconfirm, NTag, type DataTableColumns } from 'naive-ui';
+import { NButton, NDropdown, NPopconfirm, NTag, type DataTableColumns } from 'naive-ui';
 import {
   batchDeletePulseNodes,
   batchPulseNodeCommand,
@@ -22,7 +22,6 @@ import {
   type PulseProtocolMeta,
   type PulseTrafficEvent,
   type PulseTrafficHistoryItem,
-  type PulseTrafficNode,
   type PulseTrafficRankItem
 } from '@/service/api';
 import { formatBeijingTime, formatBytes, formatRate } from '@/utils/pulse-format';
@@ -39,18 +38,15 @@ type TrafficDraft = {
   resetIntervalDays: number;
 };
 type NodeIpRow = { label: string; value: string; tone: 'warp' | 'ipv4' | 'ipv6' | 'muted' };
-type TrafficSample = { time: number; rx: number; tx: number };
 type TrafficSocketState = 'connecting' | 'live' | 'reconnecting' | 'offline';
 
 const defaultSingBoxVersion = '1.11.15';
-const trafficHistoryLimit = 60;
 const loading = ref(false);
 const nodes = ref<PulseNode[]>([]);
 const protocolMetas = ref<PulseProtocolMeta[]>([]);
 const form = reactive({ name: '', region: '', group: '', tags: '' });
 const protocolDrafts = reactive<Record<string, ProtocolDraft>>({});
 const trafficDrafts = reactive<Record<string, TrafficDraft>>({});
-const trafficHistory = reactive<Record<string, TrafficSample[]>>({});
 const selectedNodeIds = ref<string[]>([]);
 const groupFilter = ref('all');
 const rankMode = ref<'total' | 'download' | 'upload'>('total');
@@ -149,19 +145,16 @@ const columns = computed<DataTableColumns<PulseNode>>(() => [
   {
     title: '操作',
     key: 'actions',
-    width: 500,
+    width: 270,
     render(row: PulseNode) {
       return h('div', { class: 'table-actions' }, [
         h(NButton, { size: 'small', onClick: () => openInstallDrawer(row) }, { default: () => '安装命令' }),
-        h(NButton, { size: 'small', onClick: () => copyInstall(row) }, { default: () => '复制安装' }),
-        h(NButton, { size: 'small', onClick: () => queue(row, 'probe') }, { default: () => '探测' }),
-        h(NButton, { size: 'small', disabled: !canRemoteUpdateAgent(row), onClick: () => queue(row, 'agent-update-check') }, { default: () => '检查 Agent' }),
+        h(NButton, { size: 'small', type: 'primary', secondary: true, onClick: () => queue(row, 'sing-box-apply') }, { default: () => '应用配置' }),
         h(
-          NButton,
-          { size: 'small', type: 'primary', secondary: true, disabled: !canRemoteUpdateAgent(row), onClick: () => queue(row, 'agent-update') },
-          { default: () => '更新 Agent' }
+          NDropdown,
+          { options: nodeMoreActionOptions(row), trigger: 'click', onSelect: (key: string) => handleNodeAction(row, key) },
+          { default: () => h(NButton, { size: 'small' }, { default: () => '更多' }) }
         ),
-        h(NButton, { size: 'small', onClick: () => resetLinks(row) }, { default: () => '重置链接' }),
         h(
           NPopconfirm,
           { onPositiveClick: () => removeNode(row) },
@@ -203,23 +196,6 @@ async function loadData() {
     for (const node of nodes.value) {
       draftFor(node);
       trafficDraftFor(node);
-      recordTrafficSample(
-        {
-          id: node.id,
-          name: node.name,
-          status: node.status,
-          agentStatus: node.agentStatus,
-          online: node.online,
-          lastSeenAt: node.lastSeenAt,
-          region: node.region,
-          displayRegion: node.displayRegion,
-          subscriptionEnabled: node.subscriptionEnabled,
-          metrics: node.metrics,
-          traffic: node.traffic,
-          network: node.network
-        },
-        Date.now()
-      );
     }
     await loadTrafficAnalytics();
   } finally {
@@ -303,6 +279,42 @@ function openInstallDrawer(node: PulseNode) {
 async function queue(node: PulseNode, type: string) {
   const command = await queuePulseCommand(node.id, type);
   window.$message?.success(`${commandLabel(command.type)} 已下发，可在命令队列查看输出`);
+}
+
+function nodeMoreActionOptions(node: PulseNode) {
+  return [
+    { label: '复制安装命令', key: 'copy-install' },
+    { label: '复制节点 IP', key: 'copy-ips' },
+    { label: '复制上报链接', key: 'copy-links', disabled: !node.reportedLinks?.length },
+    { type: 'divider', key: 'divider-copy' },
+    { label: '探测节点', key: 'probe' },
+    { label: '诊断节点', key: 'diagnostics' },
+    { label: '渲染配置', key: 'sing-box-render' },
+    { type: 'divider', key: 'divider-agent' },
+    { label: '检查 Agent 更新', key: 'agent-update-check', disabled: !canRemoteUpdateAgent(node) },
+    { label: '更新 Agent', key: 'agent-update', disabled: !canRemoteUpdateAgent(node) },
+    { label: '重启 Agent', key: 'restart' },
+    { type: 'divider', key: 'divider-singbox' },
+    { label: '安装 sing-box', key: 'sing-box-install' },
+    { label: '强制更新 sing-box', key: 'sing-box-reinstall' },
+    { label: '重启 sing-box', key: 'sing-box-restart' },
+    { label: '重置订阅链接', key: 'reset-links' },
+    { type: 'divider', key: 'divider-order' },
+    { label: '上移节点', key: 'move-up' },
+    { label: '下移节点', key: 'move-down' }
+  ];
+}
+
+async function handleNodeAction(node: PulseNode, key: string) {
+  if (key === 'copy-install') return copyInstall(node);
+  if (key === 'copy-ips') return copyNodeIps(node);
+  if (key === 'copy-links') return copyReportedLinks(node);
+  if (key === 'reset-links') return resetLinks(node);
+  if (key === 'move-up') return moveNode(node, -1);
+  if (key === 'move-down') return moveNode(node, 1);
+  if (key === 'sing-box-install') return queueSingBoxInstall(node, false);
+  if (key === 'sing-box-reinstall') return queueSingBoxInstall(node, true);
+  return queue(node, key);
 }
 
 async function batchQueue(type: string) {
@@ -636,48 +648,6 @@ function protocolBadges(protocol: PulseNode['protocols'][number]) {
   return badges;
 }
 
-function recordTrafficSample(item: PulseTrafficNode, time: number) {
-  const samples = trafficHistory[item.id] || (trafficHistory[item.id] = []);
-  const rx = Number(item.traffic?.rxRateBytesPerSecond) || 0;
-  const tx = Number(item.traffic?.txRateBytesPerSecond) || 0;
-  const last = samples[samples.length - 1];
-  if (last && last.time === time) {
-    last.rx = rx;
-    last.tx = tx;
-  } else {
-    samples.push({ time, rx, tx });
-  }
-  if (samples.length > trafficHistoryLimit) samples.splice(0, samples.length - trafficHistoryLimit);
-}
-
-function trafficSamples(node: PulseNode) {
-  return trafficHistory[node.id] || [];
-}
-
-function trafficPeak(node: PulseNode) {
-  const peak = trafficSamples(node).reduce((max, sample) => Math.max(max, sample.rx, sample.tx), 0);
-  return peak > 0 ? peak : 1;
-}
-
-function trafficPath(node: PulseNode, direction: 'rx' | 'tx') {
-  const samples = trafficSamples(node);
-  if (samples.length < 2) return '';
-  const width = 240;
-  const height = 52;
-  const peak = trafficPeak(node);
-  return samples
-    .map((sample, index) => {
-      const x = (index / (samples.length - 1)) * width;
-      const y = height - (Math.max(0, sample[direction]) / peak) * height;
-      return `${x.toFixed(1)},${Math.max(0, Math.min(height, y)).toFixed(1)}`;
-    })
-    .join(' ');
-}
-
-function latestTrafficRate(node: PulseNode, direction: 'rx' | 'tx') {
-  return direction === 'rx' ? node.traffic?.rxRateBytesPerSecond : node.traffic?.txRateBytesPerSecond;
-}
-
 function trafficUsagePercent(node: PulseNode) {
   const threshold = Number(node.traffic?.thresholdBytes) || 0;
   if (threshold <= 0) return 0;
@@ -784,10 +754,8 @@ function trafficSocketLabel() {
 
 function applyTrafficEvent(event: PulseTrafficEvent) {
   if (event.type !== 'traffic.snapshot' || !event.items?.length) return;
-  const sampleTime = event.time ? Date.parse(event.time) || Date.now() : Date.now();
   for (const item of event.items) {
     const node = nodes.value.find(current => current.id === item.id);
-    recordTrafficSample(item, sampleTime);
     if (!node) continue;
     node.status = item.status;
     node.agentStatus = item.agentStatus;
@@ -839,7 +807,6 @@ function connectTrafficStream() {
 async function removeNode(node: PulseNode) {
   const result = await deletePulseNode(node.id);
   nodes.value = nodes.value.filter(item => item.id !== node.id);
-  delete trafficHistory[node.id];
   delete trafficDrafts[node.id];
   delete protocolDrafts[node.id];
   await loadTrafficAnalytics();
@@ -964,7 +931,7 @@ onUnmounted(() => {
     </NGrid>
 
     <NGrid :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
-      <NGi v-for="node in visibleNodes" :key="node.id" span="24 l:12 2xl:8">
+      <NGi v-for="node in visibleNodes" :key="node.id" span="24 m:12 xl:8 2xl:6">
         <NCard :bordered="false" class="card-wrapper node-card">
           <div class="node-head">
             <div class="node-title-block">
@@ -994,48 +961,28 @@ onUnmounted(() => {
 
           <div class="metric-grid">
             <div class="metric-item">
-              <span>模式</span>
-              <strong>{{ ipModeLabel(node.network?.ipMode) }}</strong>
+              <span>CPU / 内存</span>
+              <strong>
+                {{ node.metrics?.cpu?.usagePercent == null ? '-' : `${node.metrics.cpu.usagePercent}%` }}
+                /
+                {{ node.metrics?.memory?.usagePercent == null ? '-' : `${node.metrics.memory.usagePercent}%` }}
+              </strong>
             </div>
             <div class="metric-item">
-              <span>CPU</span>
-              <strong>{{ node.metrics?.cpu?.usagePercent == null ? '-' : `${node.metrics.cpu.usagePercent}%` }}</strong>
+              <span>当前速率</span>
+              <strong>↓ {{ formatRate(node.traffic?.rxRateBytesPerSecond) }} · ↑ {{ formatRate(node.traffic?.txRateBytesPerSecond) }}</strong>
             </div>
             <div class="metric-item">
-              <span>内存</span>
-              <strong>{{ node.metrics?.memory?.usagePercent == null ? '-' : `${node.metrics.memory.usagePercent}%` }}</strong>
+              <span>累计流量</span>
+              <strong>↓ {{ formatBytes(node.traffic?.totalRxBytes) }} · ↑ {{ formatBytes(node.traffic?.totalTxBytes) }}</strong>
             </div>
             <div class="metric-item">
-              <span>下载速率</span>
-              <strong>{{ formatRate(node.traffic?.rxRateBytesPerSecond) }}</strong>
-            </div>
-            <div class="metric-item">
-              <span>上传速率</span>
-              <strong>{{ formatRate(node.traffic?.txRateBytesPerSecond) }}</strong>
-            </div>
-            <div class="metric-item">
-              <span>下载总量</span>
-              <strong>{{ formatBytes(node.traffic?.totalRxBytes) }}</strong>
-            </div>
-            <div class="metric-item">
-              <span>上传总量</span>
-              <strong>{{ formatBytes(node.traffic?.totalTxBytes) }}</strong>
-            </div>
-            <div class="metric-item">
-              <span>总流量</span>
-              <strong>{{ formatBytes(node.traffic?.totalBytes) }}</strong>
-            </div>
-            <div class="metric-item">
-              <span>订阅</span>
-              <strong>{{ node.subscriptionEnabled ? '启用' : '停用' }}</strong>
+              <span>总量 / 策略</span>
+              <strong>{{ formatBytes(node.traffic?.totalBytes) }} · {{ trafficUsageLabel(node) }}</strong>
             </div>
             <div class="metric-item">
               <span>Agent</span>
-              <strong>{{ agentVersionLabel(node) }}</strong>
-            </div>
-            <div class="metric-item">
-              <span>更新</span>
-              <strong>{{ agentUpdateLabel(node) }}</strong>
+              <strong>{{ agentVersionLabel(node) }} · {{ agentUpdateLabel(node) }}</strong>
             </div>
             <div class="metric-item">
               <span>最后上报</span>
@@ -1043,50 +990,18 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div class="traffic-panel">
-            <div class="traffic-head">
-              <div>
-                <div class="traffic-title">实时流量</div>
-                <div class="traffic-subtitle">峰值 {{ formatRate(trafficPeak(node)) }} · {{ trafficSamples(node).length }} 个样本</div>
-              </div>
-              <div class="traffic-rates">
-                <span class="rx">下载 {{ formatRate(latestTrafficRate(node, 'rx')) }}</span>
-                <span class="tx">上传 {{ formatRate(latestTrafficRate(node, 'tx')) }}</span>
-              </div>
+          <div class="traffic-limit compact-limit">
+            <div class="traffic-limit-bar">
+              <span :style="{ width: `${trafficUsagePercent(node)}%` }" />
             </div>
-            <div class="traffic-chart">
-              <svg viewBox="0 0 240 52" preserveAspectRatio="none" aria-hidden="true">
-                <line x1="0" y1="51.5" x2="240" y2="51.5" class="axis-line" />
-                <polyline v-if="trafficPath(node, 'rx')" :points="trafficPath(node, 'rx')" class="traffic-line rx-line" />
-                <polyline v-if="trafficPath(node, 'tx')" :points="trafficPath(node, 'tx')" class="traffic-line tx-line" />
-              </svg>
-              <div v-if="trafficSamples(node).length < 2" class="traffic-empty">等待流量样本</div>
-            </div>
-            <div class="traffic-limit">
-              <div class="traffic-limit-bar">
-                <span :style="{ width: `${trafficUsagePercent(node)}%` }" />
-              </div>
-              <span>{{ trafficUsageLabel(node) }}</span>
-            </div>
+            <span>{{ node.subscriptionEnabled ? '订阅启用' : '订阅停用' }}</span>
           </div>
 
-          <NGrid :x-gap="8" :y-gap="8" responsive="screen" item-responsive class="mt-10px">
-            <NGi span="24 s:11">
-              <NInput v-model:value="node.region" size="small" placeholder="手动修正区域" />
-            </NGi>
-            <NGi span="24 s:7">
-              <NInput v-model:value="node.group" size="small" placeholder="分组" />
-            </NGi>
-            <NGi span="24 s:6">
-              <NButton size="small" block secondary @click="saveRegion(node)">保存</NButton>
-            </NGi>
-          </NGrid>
-
-          <NDivider class="my-10px" />
+          <NDivider class="my-8px" />
 
           <div class="section-head">
             <NText strong>协议</NText>
-            <NText depth="3">{{ node.protocols?.length || 0 }} 个协议</NText>
+            <NText depth="3">{{ node.protocols?.length || 0 }} 个 · sing-box {{ node.singBox?.installed ? '已安装' : '未安装' }}</NText>
           </div>
           <div v-if="node.protocols?.length" class="protocol-list">
             <div v-for="protocol in node.protocols" :key="protocol.id" class="protocol-row">
@@ -1103,7 +1018,7 @@ onUnmounted(() => {
               </div>
               <NPopconfirm @positive-click="removeProtocol(node, protocol.id)">
                 <template #trigger>
-                  <NButton size="tiny" secondary type="error">删除并推送</NButton>
+                  <NButton size="tiny" secondary type="error">删除</NButton>
                 </template>
                 删除 {{ protocol.name }} :{{ protocol.port }} 并推送远程配置？
               </NPopconfirm>
@@ -1111,146 +1026,136 @@ onUnmounted(() => {
           </div>
           <NEmpty v-else size="small" description="暂无协议" />
 
-          <NGrid :x-gap="8" :y-gap="8" responsive="screen" item-responsive class="mt-10px">
-            <NGi span="24 s:8">
-              <NSelect
-                v-model:value="draftFor(node).type"
-                size="small"
-                :options="protocolOptions()"
-                @update:value="syncDraftPort(node)"
-              />
-            </NGi>
-            <NGi span="12 s:4">
-              <NInputNumber v-model:value="draftFor(node).port" size="small" :min="1" :max="65535" placeholder="端口" class="w-full" />
-            </NGi>
-            <NGi span="12 s:4">
-              <NInput v-model:value="draftFor(node).listen" size="small" placeholder="监听" />
-            </NGi>
-            <NGi span="24 s:5">
-              <NSelect
-                v-model:value="draftFor(node).variant"
-                size="small"
-                :options="protocolVariantOptions(node)"
-                filterable
-                tag
-                clearable
-                placeholder="变体"
-              />
-            </NGi>
-            <NGi span="24 s:3">
-              <NButton size="small" type="primary" block @click="addProtocol(node)">添加并推送</NButton>
-            </NGi>
-            <NGi span="24">
-              <NInput
-                v-model:value="draftFor(node).settingsJson"
-                size="small"
-                type="textarea"
-                :autosize="{ minRows: 1, maxRows: 3 }"
-                placeholder="高级设置 JSON"
-              />
-            </NGi>
-          </NGrid>
-
-          <NDivider class="my-10px" />
-
-          <div class="section-head">
-            <NText strong>流量策略</NText>
-            <NText depth="3">{{ trafficUsageLabel(node) }}</NText>
-          </div>
-          <NGrid :x-gap="8" :y-gap="8" responsive="screen" item-responsive>
-            <NGi span="12 s:6">
-              <NInputNumber
-                v-model:value="trafficDraftFor(node).thresholdGb"
-                size="small"
-                :min="0"
-                :precision="2"
-                placeholder="阈值 GB"
-                class="w-full"
-              />
-            </NGi>
-            <NGi span="12 s:4">
-              <NSelect v-model:value="trafficDraftFor(node).limitMode" size="small" :options="trafficLimitModeOptions()" />
-            </NGi>
-            <NGi span="12 s:4">
-              <NInputNumber
-                v-model:value="trafficDraftFor(node).warningPercent"
-                size="small"
-                :min="1"
-                :max="100"
-                placeholder="预警 %"
-                class="w-full"
-              />
-            </NGi>
-            <NGi span="12 s:5">
-              <NCheckbox v-model:checked="trafficDraftFor(node).autoDisableSubscription">超限停订阅</NCheckbox>
-            </NGi>
-            <NGi span="12 s:4">
-              <NCheckbox v-model:checked="trafficDraftFor(node).subscriptionEnabled">订阅启用</NCheckbox>
-            </NGi>
-            <NGi span="12 s:5">
-              <NSelect v-model:value="trafficDraftFor(node).resetMode" size="small" :options="resetModeOptions()" />
-            </NGi>
-            <NGi v-if="trafficDraftFor(node).resetMode === 'monthly'" span="12 s:4">
-              <NInputNumber v-model:value="trafficDraftFor(node).resetDay" size="small" :min="1" :max="31" placeholder="日期" class="w-full" />
-            </NGi>
-            <NGi v-if="trafficDraftFor(node).resetMode === 'interval'" span="12 s:4">
-              <NInputNumber
-                v-model:value="trafficDraftFor(node).resetIntervalDays"
-                size="small"
-                :min="1"
-                :max="365"
-                placeholder="天数"
-                class="w-full"
-              />
-            </NGi>
-            <NGi span="12 s:3">
-              <NButton size="small" block secondary @click="saveTrafficPolicy(node)">保存</NButton>
-            </NGi>
-            <NGi span="12 s:3">
-              <NPopconfirm @positive-click="resetNodeTraffic(node)">
-                <template #trigger>
-                  <NButton size="small" block secondary>清零</NButton>
-                </template>
-                清零 {{ node.name }} 当前流量统计？
-              </NPopconfirm>
-            </NGi>
-          </NGrid>
-
-          <NDivider class="my-10px" />
+          <NDivider class="my-8px" />
 
           <div class="node-actions">
             <NButton size="small" @click="openInstallDrawer(node)">安装命令</NButton>
-            <NButton size="small" @click="copyInstall(node)">复制安装</NButton>
-            <NButton size="small" @click="copyNodeIps(node)">复制 IP</NButton>
-            <NButton size="small" @click="moveNode(node, -1)">上移</NButton>
-            <NButton size="small" @click="moveNode(node, 1)">下移</NButton>
-            <NButton size="small" @click="queue(node, 'probe')">探测</NButton>
-            <NButton size="small" @click="queue(node, 'diagnostics')">诊断</NButton>
-            <NButton size="small" :disabled="!canRemoteUpdateAgent(node)" @click="queue(node, 'agent-update-check')">检查 Agent</NButton>
-            <NButton size="small" type="primary" secondary :disabled="!canRemoteUpdateAgent(node)" @click="queue(node, 'agent-update')">更新 Agent</NButton>
-            <NButton size="small" @click="queue(node, 'restart')">重启 Agent</NButton>
-            <NButton size="small" @click="queue(node, 'sing-box-render')">渲染</NButton>
-            <NButton size="small" type="primary" secondary @click="queue(node, 'sing-box-apply')">应用配置</NButton>
-            <NButton size="small" @click="queue(node, 'sing-box-restart')">重启 sing-box</NButton>
-            <NButton size="small" @click="resetLinks(node)">重置链接</NButton>
-            <NButton size="small" :disabled="!node.reportedLinks?.length" @click="copyReportedLinks(node)">复制链接</NButton>
+            <NPopover trigger="click" placement="top-start">
+              <template #trigger>
+                <NButton size="small" secondary>添加协议</NButton>
+              </template>
+              <NSpace vertical :size="8" class="protocol-popover">
+                <NGrid :x-gap="8" :y-gap="8" responsive="screen" item-responsive>
+                  <NGi span="24 s:10">
+                    <NSelect
+                      v-model:value="draftFor(node).type"
+                      size="small"
+                      :options="protocolOptions()"
+                      @update:value="syncDraftPort(node)"
+                    />
+                  </NGi>
+                  <NGi span="12 s:6">
+                    <NInputNumber v-model:value="draftFor(node).port" size="small" :min="1" :max="65535" placeholder="端口" class="w-full" />
+                  </NGi>
+                  <NGi span="12 s:8">
+                    <NInput v-model:value="draftFor(node).listen" size="small" placeholder="监听" />
+                  </NGi>
+                  <NGi span="24">
+                    <NSelect
+                      v-model:value="draftFor(node).variant"
+                      size="small"
+                      :options="protocolVariantOptions(node)"
+                      filterable
+                      tag
+                      clearable
+                      placeholder="变体"
+                    />
+                  </NGi>
+                  <NGi span="24">
+                    <NInput
+                      v-model:value="draftFor(node).settingsJson"
+                      size="small"
+                      type="textarea"
+                      :autosize="{ minRows: 1, maxRows: 3 }"
+                      placeholder="高级设置 JSON"
+                    />
+                  </NGi>
+                </NGrid>
+                <NButton size="small" type="primary" block @click="addProtocol(node)">添加并推送</NButton>
+              </NSpace>
+            </NPopover>
             <NPopover trigger="click" placement="top">
               <template #trigger>
-                <NButton size="small">安装/更新 sing-box</NButton>
+                <NButton size="small" secondary>编辑</NButton>
               </template>
-              <NSpace vertical :size="8" class="singbox-popover">
-                <NInput v-model:value="singBoxDraftFor(node).version" size="small" placeholder="版本，如 1.11.15" />
-                <NInput v-model:value="singBoxDraftFor(node).downloadUrl" size="small" placeholder="下载 URL，可选" />
-                <NInput v-model:value="singBoxDraftFor(node).sha256" size="small" placeholder="SHA-256，可选" />
+              <NSpace vertical :size="8" class="edit-popover">
+                <NInput v-model:value="node.region" size="small" placeholder="手动修正区域" />
+                <NInput v-model:value="node.group" size="small" placeholder="分组" />
+                <NButton size="small" type="primary" block @click="saveRegion(node)">保存</NButton>
+              </NSpace>
+            </NPopover>
+            <NPopover trigger="click" placement="top">
+              <template #trigger>
+                <NButton size="small" secondary>策略</NButton>
+              </template>
+              <NSpace vertical :size="8" class="policy-popover">
+                <NGrid :x-gap="8" :y-gap="8" responsive="screen" item-responsive>
+                  <NGi span="12">
+                    <NInputNumber
+                      v-model:value="trafficDraftFor(node).thresholdGb"
+                      size="small"
+                      :min="0"
+                      :precision="2"
+                      placeholder="阈值 GB"
+                      class="w-full"
+                    />
+                  </NGi>
+                  <NGi span="12">
+                    <NSelect v-model:value="trafficDraftFor(node).limitMode" size="small" :options="trafficLimitModeOptions()" />
+                  </NGi>
+                  <NGi span="12">
+                    <NInputNumber
+                      v-model:value="trafficDraftFor(node).warningPercent"
+                      size="small"
+                      :min="1"
+                      :max="100"
+                      placeholder="预警 %"
+                      class="w-full"
+                    />
+                  </NGi>
+                  <NGi span="12">
+                    <NSelect v-model:value="trafficDraftFor(node).resetMode" size="small" :options="resetModeOptions()" />
+                  </NGi>
+                  <NGi v-if="trafficDraftFor(node).resetMode === 'monthly'" span="12">
+                    <NInputNumber v-model:value="trafficDraftFor(node).resetDay" size="small" :min="1" :max="31" placeholder="日期" class="w-full" />
+                  </NGi>
+                  <NGi v-if="trafficDraftFor(node).resetMode === 'interval'" span="12">
+                    <NInputNumber
+                      v-model:value="trafficDraftFor(node).resetIntervalDays"
+                      size="small"
+                      :min="1"
+                      :max="365"
+                      placeholder="天数"
+                      class="w-full"
+                    />
+                  </NGi>
+                  <NGi span="12">
+                    <NCheckbox v-model:checked="trafficDraftFor(node).autoDisableSubscription">超限停订阅</NCheckbox>
+                  </NGi>
+                  <NGi span="12">
+                    <NCheckbox v-model:checked="trafficDraftFor(node).subscriptionEnabled">订阅启用</NCheckbox>
+                  </NGi>
+                </NGrid>
                 <NSpace :size="8">
-                  <NButton size="small" type="primary" @click="queueSingBoxInstall(node, false)">安装</NButton>
-                  <NButton size="small" secondary @click="queueSingBoxInstall(node, true)">强制更新</NButton>
+                  <NButton size="small" type="primary" @click="saveTrafficPolicy(node)">保存</NButton>
+                  <NPopconfirm @positive-click="resetNodeTraffic(node)">
+                    <template #trigger>
+                      <NButton size="small" secondary>清零</NButton>
+                    </template>
+                    清零 {{ node.name }} 当前流量统计？
+                  </NPopconfirm>
                 </NSpace>
               </NSpace>
             </NPopover>
+            <NButton size="small" type="primary" secondary @click="queue(node, 'sing-box-apply')">应用配置</NButton>
+            <NDropdown :options="nodeMoreActionOptions(node)" trigger="click" @select="key => handleNodeAction(node, String(key))">
+              <template #trigger>
+                <NButton size="small">更多</NButton>
+              </template>
+            </NDropdown>
             <NPopconfirm @positive-click="removeNode(node)">
               <template #trigger>
-                <NButton size="small" type="error" secondary>删除节点</NButton>
+                <NButton size="small" type="error" secondary>删除</NButton>
               </template>
               删除节点 {{ node.name }}？
             </NPopconfirm>
@@ -1410,14 +1315,14 @@ onUnmounted(() => {
 }
 
 .node-card :deep(.n-card__content) {
-  padding-top: 14px;
+  padding: 12px;
 }
 
 .node-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
 }
 
 .node-title-block {
@@ -1428,9 +1333,9 @@ onUnmounted(() => {
   min-width: 0;
   overflow: hidden;
   color: var(--n-text-color, #1f2937);
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 650;
-  line-height: 22px;
+  line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1439,22 +1344,22 @@ onUnmounted(() => {
   min-width: 0;
   overflow: hidden;
   color: var(--n-text-color-disabled, #64748b);
-  font-size: 12px;
-  line-height: 18px;
+  font-size: 11px;
+  line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .ip-strip {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(142px, 1fr));
-  gap: 7px;
-  margin-top: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 6px;
+  margin-top: 8px;
 }
 
 .ip-pill {
   min-width: 0;
-  padding: 6px 8px;
+  padding: 5px 7px;
   border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 6px;
   background: rgba(148, 163, 184, 0.07);
@@ -1475,7 +1380,7 @@ onUnmounted(() => {
   overflow: hidden;
   color: var(--n-text-color, #1f2937);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 650;
   line-height: 17px;
   text-overflow: ellipsis;
@@ -1503,14 +1408,14 @@ onUnmounted(() => {
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 8px;
 }
 
 .metric-item {
   min-width: 0;
-  padding: 7px 8px;
+  padding: 6px 7px;
   border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 6px;
   background: rgba(148, 163, 184, 0.07);
@@ -1519,8 +1424,8 @@ onUnmounted(() => {
 .metric-item span {
   display: block;
   color: var(--n-text-color-disabled, #64748b);
-  font-size: 11px;
-  line-height: 15px;
+  font-size: 10px;
+  line-height: 14px;
 }
 
 .metric-item strong {
@@ -1528,22 +1433,13 @@ onUnmounted(() => {
   min-width: 0;
   overflow: hidden;
   color: var(--n-text-color, #1f2937);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.traffic-panel {
-  margin-top: 10px;
-  padding: 9px;
-  border: 1px solid rgba(96, 165, 250, 0.22);
-  border-radius: 6px;
-  background: linear-gradient(180deg, rgba(59, 130, 246, 0.08), rgba(16, 185, 129, 0.05));
-}
-
-.traffic-head,
 .traffic-limit {
   display: flex;
   align-items: center;
@@ -1551,53 +1447,10 @@ onUnmounted(() => {
   gap: 8px;
 }
 
-.traffic-title {
-  color: var(--n-text-color, #1f2937);
-  font-size: 12px;
-  font-weight: 650;
-  line-height: 18px;
-}
-
-.traffic-subtitle,
 .traffic-limit span:last-child {
   color: var(--n-text-color-disabled, #64748b);
   font-size: 11px;
   line-height: 16px;
-}
-
-.traffic-rates {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
-  min-width: 0;
-  font-size: 11px;
-  line-height: 16px;
-}
-
-.traffic-rates span {
-  white-space: nowrap;
-}
-
-.traffic-rates .rx {
-  color: #2563eb;
-}
-
-.traffic-rates .tx {
-  color: #059669;
-}
-
-.traffic-chart {
-  position: relative;
-  height: 62px;
-  margin-top: 6px;
-  overflow: hidden;
-}
-
-.traffic-chart svg {
-  display: block;
-  width: 100%;
-  height: 52px;
 }
 
 .axis-line {
@@ -1633,7 +1486,11 @@ onUnmounted(() => {
 }
 
 .traffic-limit {
-  margin-top: 4px;
+  margin-top: 7px;
+}
+
+.compact-limit {
+  min-height: 20px;
 }
 
 .traffic-limit-bar {
@@ -1658,20 +1515,20 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .protocol-list {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .protocol-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 8px;
+  gap: 6px;
+  padding: 6px 7px;
   border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 6px;
 }
@@ -1685,7 +1542,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   color: var(--n-text-color, #1f2937);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 650;
   line-height: 18px;
 }
@@ -1694,24 +1551,26 @@ onUnmounted(() => {
   min-width: 0;
   overflow: hidden;
   color: var(--n-text-color-disabled, #64748b);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .protocol-badges {
-  margin-top: 5px;
+  margin-top: 4px;
 }
 
 .node-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
 }
 
-.singbox-popover {
-  width: min(320px, calc(100vw - 48px));
+.protocol-popover,
+.edit-popover,
+.policy-popover {
+  width: min(360px, calc(100vw - 48px));
 }
 
 @media (max-width: 640px) {
@@ -1725,7 +1584,7 @@ onUnmounted(() => {
   }
 
   .metric-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .protocol-row {
@@ -1733,14 +1592,9 @@ onUnmounted(() => {
     flex-direction: column;
   }
 
-  .traffic-head,
   .traffic-limit {
     align-items: flex-start;
     flex-direction: column;
-  }
-
-  .traffic-rates {
-    justify-content: flex-start;
   }
 }
 </style>

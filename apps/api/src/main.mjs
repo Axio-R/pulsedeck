@@ -17,12 +17,15 @@ const DEFAULT_GEOIP_FILE = path.join(ROOT_DIR, 'geoip.json');
 const DEFAULT_GEOSITE_FILE = path.join(ROOT_DIR, 'geosite.json');
 const PORT = Number(process.env.PULSEDECK_PORT || 14770);
 const HOST = process.env.PULSEDECK_HOST || '0.0.0.0';
-const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.9';
+const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.10';
 const AGENT_VERSION = process.env.PULSEDECK_AGENT_VERSION || `${APP_VERSION}-rust`;
 const AGENT_RUNTIME_TARGETS = ['linux-x64', 'linux-arm64', 'linux-armv7l'];
 const ADMIN_USER = process.env.PULSEDECK_ADMIN_USER || 'admin';
 const ADMIN_PASSWORD = process.env.PULSEDECK_ADMIN_PASSWORD || 'change-me';
 const TRAFFIC_HISTORY_LIMIT = Math.max(Number(process.env.PULSEDECK_TRAFFIC_HISTORY_LIMIT) || 20_000, 1000);
+const COMMAND_HISTORY_LIMIT = Math.max(Number(process.env.PULSEDECK_COMMAND_HISTORY_LIMIT) || 1000, 100);
+const COMMAND_EVENT_HISTORY_LIMIT = Math.max(Number(process.env.PULSEDECK_COMMAND_EVENT_HISTORY_LIMIT) || 10_000, 500);
+const COMMAND_RETENTION_DAYS = Math.max(Number(process.env.PULSEDECK_COMMAND_RETENTION_DAYS) || 30, 1);
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
@@ -1475,6 +1478,62 @@ function commandEvents(data, commandId) {
     });
 }
 
+function commandTimeValue(command) {
+  const parsed = Date.parse(command.updatedAt || command.createdAt || '');
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function eventTimeValue(event) {
+  const parsed = Date.parse(event.createdAt || '');
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function pruneCommandHistory(draft) {
+  draft.commands ||= [];
+  draft.commandEvents ||= [];
+  const activeStatuses = new Set(['queued', 'running']);
+  const cutoff = Date.now() - COMMAND_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  const removeCommandIds = new Set();
+
+  for (const command of draft.commands) {
+    if (!activeStatuses.has(command.status) && commandTimeValue(command) > 0 && commandTimeValue(command) < cutoff) {
+      removeCommandIds.add(command.id);
+    }
+  }
+
+  const completed = draft.commands
+    .filter((command) => !activeStatuses.has(command.status) && !removeCommandIds.has(command.id))
+    .sort((a, b) => commandTimeValue(a) - commandTimeValue(b));
+  if (completed.length > COMMAND_HISTORY_LIMIT) {
+    for (const command of completed.slice(0, completed.length - COMMAND_HISTORY_LIMIT)) {
+      removeCommandIds.add(command.id);
+    }
+  }
+
+  if (removeCommandIds.size) {
+    draft.commands = draft.commands.filter((command) => !removeCommandIds.has(command.id));
+    draft.commandEvents = draft.commandEvents.filter((event) => !removeCommandIds.has(event.commandId));
+  }
+
+  const commandIds = new Set(draft.commands.map((command) => command.id));
+  draft.commandEvents = draft.commandEvents.filter((event) => commandIds.has(event.commandId));
+
+  if (draft.commandEvents.length > COMMAND_EVENT_HISTORY_LIMIT) {
+    const activeCommandIds = new Set(draft.commands.filter((command) => activeStatuses.has(command.status)).map((command) => command.id));
+    const removableEvents = draft.commandEvents
+      .filter((event) => !activeCommandIds.has(event.commandId))
+      .sort((a, b) => eventTimeValue(a) - eventTimeValue(b));
+    const removeEventIds = new Set(
+      removableEvents
+        .slice(0, Math.max(0, draft.commandEvents.length - COMMAND_EVENT_HISTORY_LIMIT))
+        .map((event) => event.id)
+    );
+    if (removeEventIds.size) {
+      draft.commandEvents = draft.commandEvents.filter((event) => !removeEventIds.has(event.id));
+    }
+  }
+}
+
 function appendCommandEvent(draft, command, input = {}) {
   draft.commandEvents ||= [];
   const event = {
@@ -1495,6 +1554,7 @@ function appendCommandEvent(draft, command, input = {}) {
     const remove = new Set(related.slice(0, related.length - 500).map((item) => item.id));
     draft.commandEvents = draft.commandEvents.filter((item) => !remove.has(item.id));
   }
+  pruneCommandHistory(draft);
   return event;
 }
 
@@ -2720,6 +2780,9 @@ async function handleApi(req, res, store, url, realtime = {}) {
 export async function createPulseDeckServer(options = {}) {
   const store = options.store || new JsonStore(options.dataFile);
   await store.load();
+  await store.update((draft) => {
+    pruneCommandHistory(draft);
+  });
   const trafficHub = createTrafficHub(store);
   const agentControlHub = createAgentControlHub(store, { broadcastTraffic: () => trafficHub.broadcast() });
 

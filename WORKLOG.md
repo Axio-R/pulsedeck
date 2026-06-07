@@ -86,6 +86,27 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 ### 2026-06-07
 
 - Implementation direction for this turn:
+  - Continue node management optimization with a smaller, denser node-card layout and fewer primary buttons.
+  - Fix the sing-box state mismatch where the panel can show sing-box installed but later protocol push cannot find the executable.
+  - Add command queue/event retention so long-running panels do not accumulate unbounded command logs.
+  - Prepare the project metadata for `v0.2.10`.
+- Implementation completed before commit:
+  - Bumped panel and Agent metadata to `0.2.10` / `0.2.10-rust`.
+  - Reworked node cards into a compact summary layout: removed per-card real-time traffic charts, merged CPU/memory/rate/total/Agent fields, moved region/group editing, protocol creation, and traffic policy controls into popovers, and moved low-frequency operations into a `更多` menu.
+  - Kept IP copy behavior available by clicking IP rows and through the `更多` menu, while removing the always-visible copy/probe/diagnostics/render button clutter from cards and the table action column.
+  - Added Agent-side sing-box state persistence under the Agent state directory, context-aware executable discovery from env/config/local state/panel-reported node state/common paths, and clearer failure messages listing checked paths.
+  - Made sing-box install/reuse write local runtime state, made render/apply/restart use the same contextual binary lookup, and added protocol port checks for duplicate ports and ports occupied outside the current saved sing-box configuration.
+  - Added API command retention defaults: keep queued/running commands, retain up to 1000 completed commands, retain up to 10000 events, and prune completed commands older than 30 days; all limits are env-configurable.
+  - Added API test coverage for command history pruning preserving active commands while trimming completed history and orphaned events.
+- Local verification before commit:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 15 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `git diff --check`: passed after cleaning generated router typing whitespace.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine has no `cargo`; `rustc --version` is also unavailable, so Rust compilation must be validated by GitHub Actions/GHCR.
+
+- Implementation direction for this turn:
   - Continue from target 4: improve subscription distribution without making the panel heavy.
   - Add panel-visible Agent version state, remote Agent update check, and remote Agent binary update commands.
   - Add compact region icons/markers to node management and add region prefixes to subscription link names.
