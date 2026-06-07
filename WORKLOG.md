@@ -86,6 +86,26 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 ### 2026-06-07
 
 - Implementation direction for this turn:
+  - Continue optimizing the Rust Agent local UX and node management panel after the traffic WebSocket deployment.
+  - Redesign `pk menu` around operator actions: install/repair service, uninstall Agent, check/update Agent, inspect information, run once, logs, doctor, restart, stop, and config path.
+  - Add multi-platform Agent release packaging so tagged releases can publish downloadable Agent archives for x86_64, aarch64, and armv7 Linux targets.
+  - Compact the Nodes UI and make install/protocol/remote sing-box actions clearer, including a clipboard fallback for install command copy, protocol detail chips, custom port controls, apply/render/restart buttons, and reset-link wording.
+- Implementation completed in this turn:
+  - Expanded the Rust Agent command UX with `info`, `install-service` / `repair-service`, `service-status`, `stop`, `update-check`, and confirmed `uninstall` / `remove` / `delete` aliases with an interactive confirmation unless `--yes` is provided.
+  - Reworked `pk menu` into an operator-oriented menu covering install/repair, uninstall, update check, update, information, service status, stop, run once, logs, doctor, restart, and config path.
+  - Added Agent service management helpers for systemd, OpenRC, cron/manual startup, serviceMode config updates, service status inspection, background daemon start, shortcut cleanup, scoped Agent-home cleanup, and safe uninstall behavior.
+  - Updated the generated Agent installer hints to surface `pk menu`, `pk info`, `pk service-status`, `pk update-check`, `pk update`, and `pk uninstall --yes`.
+  - Added `.github/workflows/agent-release.yml` to build static Rust Agent release archives for `linux-x64`, `linux-arm64`, and `linux-armv7l`, upload workflow artifacts, and publish GitHub release assets with `SHA256SUMS` on tags or manual release tags.
+  - Redesigned the Nodes UI cards into a more compact layout with metric tiles, a drawer for install commands, robust clipboard fallback, protocol detail chips, clearer add/delete-and-push protocol actions, sing-box render/apply/restart buttons, link-copy action, and a compact sing-box install/update popover with version/download URL/SHA-256 fields.
+- Local verification after Agent UX and Nodes UI work:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 9 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: could not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+  - No local Docker image build was performed.
+
+- Implementation direction for this turn:
   - Continue the remaining worklog items after command streaming and GeoIP/Geosite.
   - Add browser-facing WebSocket real-time traffic push without adding a backend dependency.
   - Harden the Rust Agent sing-box templates so production TLS/Reality/Hysteria2/Tuic/AnyTLS variants fail clearly when required key material is missing.

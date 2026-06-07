@@ -1,0 +1,99 @@
+name: Build Agent Release
+
+on:
+  push:
+    tags:
+      - 'agent-v*'
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to create or update, for example agent-v0.1.0'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        env:
+          DISPATCH_TAG: ${{ github.event.inputs.release_tag || '' }}
+        run: |
+          if [ -n "$DISPATCH_TAG" ]; then
+            VERSION="$DISPATCH_TAG"
+          elif [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            VERSION="$GITHUB_REF_NAME"
+          else
+            VERSION="agent-${GITHUB_SHA:0:7}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build static Agent binaries
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work/apps/agent rust:1.87-alpine sh -lc '
+            rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl armv7-unknown-linux-musleabihf
+            cargo build --release --locked --target x86_64-unknown-linux-musl
+            CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld cargo build --release --locked --target aarch64-unknown-linux-musl
+            CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=rust-lld cargo build --release --locked --target armv7-unknown-linux-musleabihf
+          '
+
+      - name: Package Agent archives
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          mkdir -p dist/agent-release
+          package() {
+            target="$1"
+            triple="$2"
+            pkg="pulsedeck-agent-${VERSION}-${target}"
+            dir="dist/${pkg}"
+            mkdir -p "$dir"
+            cp "apps/agent/target/${triple}/release/pulsedeck-agent" "$dir/pulsedeck-agent"
+            chmod +x "$dir/pulsedeck-agent"
+            cp README.md LICENSE "$dir/"
+            cat > "$dir/INSTALL.txt" <<EOF
+PulseDeck Agent ${VERSION} (${target})
+
+Panel install command:
+  curl -fsSL https://YOUR_PANEL/api/v1/agents/install/YOUR_INSTALL_ID | sh
+
+Manual run:
+  PULSEDECK_AGENT_CONFIG=/etc/pulsedeck/agent.json ./pulsedeck-agent menu
+
+Common commands:
+  ./pulsedeck-agent info
+  ./pulsedeck-agent install-service
+  ./pulsedeck-agent update-check
+  ./pulsedeck-agent update
+  ./pulsedeck-agent uninstall --yes
+EOF
+            tar -czf "dist/agent-release/${pkg}.tar.gz" -C dist "$pkg"
+          }
+          package linux-x64 x86_64-unknown-linux-musl
+          package linux-arm64 aarch64-unknown-linux-musl
+          package linux-armv7l armv7-unknown-linux-musleabihf
+          cd dist/agent-release
+          sha256sum *.tar.gz > SHA256SUMS
+
+      - name: Upload Agent artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pulsedeck-agent-${{ steps.version.outputs.version }}
+          path: dist/agent-release/*
+
+      - name: Publish GitHub release
+        if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.release_tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: PulseDeck Agent ${{ steps.version.outputs.version }}
+          files: dist/agent-release/*

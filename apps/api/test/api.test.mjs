@@ -131,7 +131,9 @@ test('node enrollment install script is LXC and Rust multi-arch aware', async ()
     assert.match(script.body, /systemd/);
     assert.match(script.body, /openrc/);
     assert.match(script.body, /PK/);
-    assert.match(script.body, /pk status/);
+    assert.match(script.body, /pk menu/);
+    assert.match(script.body, /pk info/);
+    assert.match(script.body, /pk update-check/);
     assert.match(script.body, /RK/);
     assert.doesNotMatch(script.body, /Node\.js runtime/);
     assert.doesNotMatch(script.body, /node-v/);

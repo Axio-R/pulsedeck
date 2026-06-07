@@ -206,6 +206,6 @@ EOF
 say "PulseDeck Rust Agent installed for $PULSEDECK_BASE_URL with install ID $PULSEDECK_INSTALL_ID."
 say "Service mode: $SERVICE_MODE"
 say "Shortcuts: $PK_PATH, $pk_path, $RK_PATH, $rk_path"
-say "Use: pk status, pk menu, pk logs, pk doctor, pk restart"
+say "Use: pk menu, pk info, pk service-status, pk update-check, pk update, pk uninstall --yes"
 `;
 }

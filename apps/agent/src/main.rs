@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -87,7 +87,8 @@ fn run() -> Result<(), String> {
             println!("{}", state_to_json(&state));
             Ok(())
         }
-        "status" | "s" | "active" | "info" => status(),
+        "status" | "s" | "active" => status(),
+        "info" | "i" => info(),
         "menu" | "m" => menu(),
         "logs" | "log" | "l" => {
             let lines = env::args()
@@ -97,6 +98,14 @@ fn run() -> Result<(), String> {
             print_logs(lines)
         }
         "doctor" | "check" | "d" => doctor(),
+        "install" | "install-service" | "repair-service" | "service-install" => install_service_command(),
+        "service" | "service-status" | "service-state" => service_status(),
+        "stop" => stop_agent_service(),
+        "uninstall" | "remove" | "delete" => {
+            let assume_yes = env::args().any(|arg| arg == "--yes" || arg == "-y");
+            uninstall_agent(assume_yes)
+        }
+        "update-check" | "check-update" => update_check(),
         "restart" | "r" => restart(),
         "update" | "u" => update_self(),
         "config" | "path" | "p" => {
@@ -108,7 +117,7 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         _ => {
-            println!("Usage: pk [status|menu|once|logs|doctor|restart|update|config|version]");
+            println!("Usage: pk [status|info|menu|once|logs|doctor|install-service|service-status|stop|restart|update-check|update|uninstall|config|version]");
             Ok(())
         }
     }
@@ -503,6 +512,31 @@ fn status() -> Result<(), String> {
     Ok(())
 }
 
+fn info() -> Result<(), String> {
+    let config = load_config()?;
+    let state = load_state(&config.state_file);
+    println!("PulseDeck Rust Agent information");
+    println!("version: {VERSION}");
+    println!("platform: {}/{}", os_name(), arch_name());
+    println!("target: {}", agent_target());
+    println!("binary: {}", env::current_exe().map(|path| path.to_string_lossy().to_string()).unwrap_or_else(|_| "-".to_string()));
+    println!("config: {}", config.config_path);
+    println!("agent home: {}", config.agent_home);
+    println!("state: {}", config.state_file);
+    println!("log: {}", config.log_file);
+    println!("panel: {}", empty_dash(&config.base_url));
+    println!("install: {}", mask(&config.install_id));
+    println!("agent: {}", mask(&state.agent_id));
+    println!("node: {}", empty_dash(&state.node_name));
+    println!("enrolled: {}", empty_dash(&state.enrolled_at));
+    println!("last seen: {}", empty_dash(&state.last_seen_at));
+    println!("configured service mode: {}", empty_dash(&config.service_mode));
+    println!("service status: {}", service_status_summary());
+    println!("sing-box binary: {}", find_sing_box_binary().unwrap_or_else(|| "-".to_string()));
+    println!("sing-box version: {}", sing_box_version().unwrap_or_else(|| "-".to_string()));
+    Ok(())
+}
+
 fn doctor() -> Result<(), String> {
     let config = load_config()?;
     println!("PulseDeck Rust Agent doctor ({VERSION})");
@@ -543,14 +577,205 @@ fn restart() -> Result<(), String> {
     Ok(())
 }
 
+fn install_service_command() -> Result<(), String> {
+    let config = load_config()?;
+    let mode = install_agent_service(&config)?;
+    set_config_service_mode(&config, &mode)?;
+    println!("Agent service installed or repaired through {mode}");
+    println!("service status: {}", service_status_summary());
+    Ok(())
+}
+
+fn install_agent_service(config: &Config) -> Result<String, String> {
+    let exe = env::current_exe().map_err(|error| format!("cannot resolve current executable: {error}"))?;
+    let exe_path = exe.to_string_lossy().to_string();
+    if is_root() && command_exists("systemctl") && Path::new("/run/systemd/system").is_dir() {
+        let unit = format!(
+            "[Unit]\nDescription=PulseDeck Rust Agent\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nEnvironment=PULSEDECK_AGENT_CONFIG={}\nExecStart={} daemon\nRestart=always\nRestartSec=8\n\n[Install]\nWantedBy=multi-user.target\n",
+            config.config_path,
+            exe_path
+        );
+        fs::write("/etc/systemd/system/pulsedeck-agent.service", unit)
+            .map_err(|error| format!("cannot write systemd unit: {error}"))?;
+        let _ = Command::new("systemctl").arg("daemon-reload").status();
+        let status = Command::new("systemctl")
+            .args(["enable", "--now", "pulsedeck-agent.service"])
+            .status()
+            .map_err(|error| format!("cannot run systemctl: {error}"))?;
+        if status.success() {
+            return Ok("systemd".to_string());
+        }
+    }
+
+    if is_root() && command_exists("rc-service") && Path::new("/etc/init.d").is_dir() {
+        let script = format!(
+            "#!/sbin/openrc-run\nname=\"PulseDeck Rust Agent\"\ncommand=\"{}\"\ncommand_args=\"daemon\"\ncommand_background=true\npidfile=\"/run/pulsedeck-agent.pid\"\nexport PULSEDECK_AGENT_CONFIG=\"{}\"\n",
+            exe_path,
+            config.config_path
+        );
+        fs::write("/etc/init.d/pulsedeck-agent", script).map_err(|error| format!("cannot write OpenRC script: {error}"))?;
+        make_executable(Path::new("/etc/init.d/pulsedeck-agent"))?;
+        let _ = Command::new("rc-update").args(["add", "pulsedeck-agent", "default"]).status();
+        let status = Command::new("rc-service")
+            .args(["pulsedeck-agent", "restart"])
+            .status()
+            .map_err(|error| format!("cannot run rc-service: {error}"))?;
+        if status.success() {
+            return Ok("openrc".to_string());
+        }
+    }
+
+    if command_exists("crontab") {
+        install_cron_boot(config, &exe_path)?;
+        start_agent_process(config, &exe_path)?;
+        return Ok("cron-manual".to_string());
+    }
+
+    start_agent_process(config, &exe_path)?;
+    Ok("manual".to_string())
+}
+
+fn service_status() -> Result<(), String> {
+    println!("{}", service_status_summary());
+    Ok(())
+}
+
+fn service_status_summary() -> String {
+    if command_exists("systemctl") {
+        if let Ok(output) = Command::new("systemctl").args(["is-active", "pulsedeck-agent.service"]).output() {
+            let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !state.is_empty() {
+                return format!("systemd:{state}");
+            }
+        }
+    }
+    if command_exists("rc-service") {
+        if let Ok(output) = Command::new("rc-service").args(["pulsedeck-agent", "status"]).output() {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let text = if stdout.is_empty() { stderr } else { stdout };
+            if !text.is_empty() {
+                return format!("openrc:{text}");
+            }
+        }
+    }
+    if command_exists("crontab") {
+        if let Ok(output) = Command::new("crontab").arg("-l").output() {
+            let raw = String::from_utf8_lossy(&output.stdout);
+            if raw.lines().any(|line| line.contains("pulsedeck-agent") && line.contains("daemon")) {
+                return "cron:installed".to_string();
+            }
+        }
+    }
+    if command_exists("pgrep") {
+        if Command::new("pgrep")
+            .args(["-f", "pulsedeck-agent daemon"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+        {
+            return "process:running".to_string();
+        }
+    }
+    "not-running".to_string()
+}
+
+fn stop_agent_service() -> Result<(), String> {
+    let mut stopped = false;
+    if command_exists("systemctl") {
+        stopped |= Command::new("systemctl")
+            .args(["stop", "pulsedeck-agent.service"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+    }
+    if command_exists("rc-service") {
+        stopped |= Command::new("rc-service")
+            .args(["pulsedeck-agent", "stop"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+    }
+    if !stopped && command_exists("pkill") {
+        stopped |= Command::new("pkill")
+            .args(["-f", "pulsedeck-agent daemon"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+    }
+    if stopped {
+        println!("Agent stop requested");
+    } else {
+        println!("No running PulseDeck Agent service was stopped");
+    }
+    Ok(())
+}
+
+fn update_check() -> Result<(), String> {
+    let config = load_config()?;
+    let target = agent_target();
+    let url = format!("{}/api/v1/agents/runtime/{}", config.base_url.trim_end_matches('/'), target);
+    let tmp_dir = Path::new(&config.agent_home).join("tmp");
+    fs::create_dir_all(&tmp_dir).map_err(|error| format!("cannot create temp dir: {error}"))?;
+    let tmp = tmp_dir.join(format!("pulsedeck-agent-update-check.{}", std::process::id()));
+    download_to(&url, &tmp.to_string_lossy())?;
+    let size = fs::metadata(&tmp).map(|meta| meta.len()).unwrap_or(0);
+    let _ = fs::remove_file(&tmp);
+    println!("local version: {VERSION}");
+    println!("target: {target}");
+    println!("runtime endpoint: {url}");
+    println!("latest runtime is downloadable: {size} bytes");
+    println!("run `pk update` to replace the local Agent binary");
+    Ok(())
+}
+
+fn uninstall_agent(assume_yes: bool) -> Result<(), String> {
+    let config = load_config()?;
+    println!("PulseDeck Agent uninstall");
+    println!("config: {}", config.config_path);
+    println!("agent home: {}", config.agent_home);
+    println!("service files: systemd/OpenRC/cron when present");
+    println!("shortcuts: PK, pk, RK, rk");
+    if !assume_yes {
+        print!("Type uninstall to continue: ");
+        let _ = io::stdout().flush();
+        let mut answer = String::new();
+        io::stdin()
+            .read_line(&mut answer)
+            .map_err(|error| format!("cannot read confirmation: {error}"))?;
+        if answer.trim() != "uninstall" {
+            println!("Uninstall cancelled");
+            return Ok(());
+        }
+    }
+
+    remove_agent_service_files();
+    for name in ["PK", "pk", "RK", "rk"] {
+        remove_shortcut(name, &config);
+    }
+    let _ = fs::remove_file(&config.config_path);
+    let _ = fs::remove_file(&config.state_file);
+    let _ = fs::remove_file(&config.log_file);
+    let _ = fs::remove_file(protocols_state_file(&config));
+    if safe_agent_home(&config.agent_home) {
+        let _ = fs::remove_dir_all(&config.agent_home);
+        println!("Removed Agent home {}", config.agent_home);
+    } else {
+        println!("Left custom Agent home in place: {}", config.agent_home);
+    }
+    println!("PulseDeck Agent uninstall completed");
+    Ok(())
+}
+
 fn update_self() -> Result<(), String> {
     let config = load_config()?;
     let current = env::current_exe().map_err(|error| format!("cannot resolve current executable: {error}"))?;
     let target = agent_target();
-    let url = format!("{}/api/v1/agents/runtime/{}", config.base_url, target);
+    let url = format!("{}/api/v1/agents/runtime/{}", config.base_url.trim_end_matches('/'), target);
     let next = format!("{}.next", current.to_string_lossy());
     let backup = format!("{}.bak", current.to_string_lossy());
     download_to(&url, &next)?;
+    make_executable(Path::new(&next))?;
     let _ = fs::copy(&current, &backup);
     fs::rename(&next, &current).map_err(|error| format!("cannot replace Agent binary: {error}"))?;
     println!("Agent binary updated. Backup: {backup}");
@@ -559,36 +784,211 @@ fn update_self() -> Result<(), String> {
 
 fn menu() -> Result<(), String> {
     println!("PulseDeck Rust Agent");
-    println!("1. status");
-    println!("2. run once");
-    println!("3. logs");
-    println!("4. doctor");
-    println!("5. restart");
-    println!("6. update");
-    println!("7. config path");
-    print!("Select action [1-7]: ");
+    println!("1. install or repair Agent service");
+    println!("2. delete/uninstall Agent");
+    println!("3. check Agent update");
+    println!("4. update Agent now");
+    println!("5. Agent information");
+    println!("6. service status");
+    println!("7. stop Agent");
+    println!("8. run once");
+    println!("9. logs");
+    println!("10. doctor");
+    println!("11. restart Agent");
+    println!("12. config path");
+    println!("0. exit");
+    print!("Select action [0-12]: ");
     let _ = io::stdout().flush();
     let mut answer = String::new();
     io::stdin()
         .read_line(&mut answer)
         .map_err(|error| format!("cannot read selection: {error}"))?;
     match answer.trim() {
-        "1" => status(),
-        "2" => {
+        "1" => install_service_command(),
+        "2" => uninstall_agent(false),
+        "3" => update_check(),
+        "4" => update_self(),
+        "5" => info(),
+        "6" => service_status(),
+        "7" => stop_agent_service(),
+        "8" => {
             let config = load_config()?;
             println!("{}", state_to_json(&run_once(&config)?));
             Ok(())
         }
-        "3" => print_logs(120),
-        "4" => doctor(),
-        "5" => restart(),
-        "6" => update_self(),
-        "7" => {
+        "9" => print_logs(120),
+        "10" => doctor(),
+        "11" => restart(),
+        "12" => {
             println!("{}", load_config()?.config_path);
             Ok(())
         }
+        "0" => Ok(()),
         _ => status(),
     }
+}
+
+fn install_cron_boot(config: &Config, exe_path: &str) -> Result<(), String> {
+    let output = Command::new("crontab").arg("-l").output();
+    let mut lines = Vec::new();
+    if let Ok(output) = output {
+        let raw = String::from_utf8_lossy(&output.stdout);
+        lines.extend(
+            raw.lines()
+                .filter(|line| !line.contains("pulsedeck-agent"))
+                .map(|line| line.to_string()),
+        );
+    }
+    lines.push(format!(
+        "@reboot PULSEDECK_AGENT_CONFIG={} {} daemon >/dev/null 2>&1",
+        sh_quote(&config.config_path),
+        sh_quote(exe_path)
+    ));
+    let body = format!("{}\n", lines.join("\n"));
+    let mut child = Command::new("crontab")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("cannot run crontab: {error}"))?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(body.as_bytes())
+            .map_err(|error| format!("cannot write crontab: {error}"))?;
+    }
+    let status = child.wait().map_err(|error| format!("cannot wait for crontab: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("cannot install Agent @reboot crontab".to_string())
+    }
+}
+
+fn start_agent_process(config: &Config, exe_path: &str) -> Result<(), String> {
+    Command::new(exe_path)
+        .arg("daemon")
+        .env("PULSEDECK_AGENT_CONFIG", &config.config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("cannot start Agent daemon: {error}"))
+}
+
+fn remove_agent_service_files() {
+    if command_exists("systemctl") {
+        let _ = Command::new("systemctl").args(["disable", "--now", "pulsedeck-agent.service"]).status();
+        let _ = fs::remove_file("/etc/systemd/system/pulsedeck-agent.service");
+        let _ = Command::new("systemctl").arg("daemon-reload").status();
+    }
+    if command_exists("rc-service") {
+        let _ = Command::new("rc-service").args(["pulsedeck-agent", "stop"]).status();
+    }
+    if command_exists("rc-update") {
+        let _ = Command::new("rc-update").args(["del", "pulsedeck-agent", "default"]).status();
+    }
+    let _ = fs::remove_file("/etc/init.d/pulsedeck-agent");
+    remove_cron_boot();
+}
+
+fn remove_cron_boot() {
+    if !command_exists("crontab") {
+        return;
+    }
+    let Ok(output) = Command::new("crontab").arg("-l").output() else {
+        return;
+    };
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let kept = raw
+        .lines()
+        .filter(|line| !line.contains("pulsedeck-agent"))
+        .map(|line| line.to_string())
+        .collect::<Vec<String>>();
+    let body = format!("{}\n", kept.join("\n"));
+    if let Ok(mut child) = Command::new("crontab").arg("-").stdin(Stdio::piped()).spawn() {
+        if let Some(stdin) = child.stdin.as_mut() {
+            let _ = stdin.write_all(body.as_bytes());
+        }
+        let _ = child.wait();
+    }
+}
+
+fn remove_shortcut(name: &str, config: &Config) {
+    for path in [
+        PathBuf::from("/usr/local/bin").join(name),
+        Path::new(&config.agent_home).join("bin").join(name),
+    ] {
+        let raw = fs::read_to_string(&path).unwrap_or_default();
+        if raw.contains("PULSEDECK_AGENT_CONFIG") && raw.contains("pulsedeck-agent") {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn safe_agent_home(path: &str) -> bool {
+    let path = Path::new(path);
+    if path == Path::new("/var/lib/pulsedeck") || path == Path::new("/opt/pulsedeck") {
+        return true;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name == ".pulsedeck" || name == "pulsedeck")
+        .unwrap_or(false)
+}
+
+fn set_config_service_mode(config: &Config, service_mode: &str) -> Result<(), String> {
+    let raw = fs::read_to_string(&config.config_path).map_err(|error| format!("cannot read config: {error}"))?;
+    let next = json_replace_or_insert_string(&raw, "serviceMode", service_mode);
+    atomic_write(&config.config_path, &next)
+}
+
+fn json_replace_or_insert_string(raw: &str, key: &str, value: &str) -> String {
+    let needle = format!("\"{key}\"");
+    if let Some(start) = raw.find(&needle) {
+        let after_key = &raw[start + needle.len()..];
+        if let Some(colon) = after_key.find(':') {
+            let value_start = start + needle.len() + colon + 1;
+            let whitespace = raw[value_start..]
+                .chars()
+                .take_while(|ch| ch.is_whitespace())
+                .map(|ch| ch.len_utf8())
+                .sum::<usize>();
+            let string_start = value_start + whitespace;
+            if raw[string_start..].starts_with('"') {
+                let mut escaped = false;
+                for (offset, ch) in raw[string_start + 1..].char_indices() {
+                    if escaped {
+                        escaped = false;
+                    } else if ch == '\\' {
+                        escaped = true;
+                    } else if ch == '"' {
+                        let string_end = string_start + 1 + offset + 1;
+                        return format!("{}\"{}\"{}", &raw[..string_start], json_escape(value), &raw[string_end..]);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(end) = raw.rfind('}') {
+        let prefix = raw[..end].trim_end();
+        let comma = if prefix.ends_with('{') { "" } else { "," };
+        return format!("{}{}\n  \"{}\": \"{}\"\n{}", prefix, comma, key, json_escape(value), &raw[end..]);
+    }
+    format!("{{\"{}\":\"{}\"}}\n", key, json_escape(value))
+}
+
+fn sh_quote(input: &str) -> String {
+    format!("'{}'", input.replace('\'', "'\"'\"'"))
+}
+
+fn is_root() -> bool {
+    Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim() == "0")
+        .unwrap_or(false)
 }
 
 fn post_json(config: &Config, endpoint: &str, token: &str, body: &str) -> Result<String, String> {
