@@ -102,6 +102,22 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `git diff --check`: passed.
   - Local API smoke on port `6291`: passed; creating VLESS Reality returned 43-character `privateKey` and `publicKey` plus default Reality connection settings.
   - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+- Committed and pushed `64e0e79 Fix Reality keys and agent updates`, then tagged and pushed `v0.2.11`.
+- GitHub Actions and release:
+  - `main` panel image run `27092072569`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+  - Tag `v0.2.11`: panel image run `27092324856` completed successfully.
+  - Tag `v0.2.11`: Agent release run `27092324848` completed successfully and published release assets.
+  - Published Agent release assets: `pulsedeck-agent-v0.2.11-linux-x64.tar.gz` 439151 bytes, `pulsedeck-agent-v0.2.11-linux-arm64.tar.gz` 412674 bytes, `pulsedeck-agent-v0.2.11-linux-armv7l.tar.gz` 408130 bytes, and `SHA256SUMS` 326 bytes.
+- Deployment after `v0.2.11`:
+  - `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+  - `docker compose up -d`: recreated and started `pulsedeck-panel`.
+  - `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed with `version: 0.2.11` and `agentVersion: 0.2.11-rust`.
+  - `GET /api/v1/agents/runtime/manifest/linux-x64`: passed with `version: 0.2.11-rust`, `sizeBytes: 909888`, and SHA-256 `cbc17154da79f2ff50a13e9d40aa470486aefa03f23316c3797fc691a395bccf`.
+- Post-deploy smoke passed:
+  - Created a temporary VLESS Reality protocol through the production panel API; the response contained 43-character `privateKey` and `publicKey` values and default Reality connection settings.
+  - Deleted the temporary smoke node and confirmed it was not present in `/api/v1/nodes`.
+  - `GET /api/v1/nodes` returned the real `hk` node with current Agent `0.2.10-rust`, latest Agent `0.2.11-rust`, update available, and remote update support enabled.
 
 ### 2026-06-07 (`v0.2.10`)
 
