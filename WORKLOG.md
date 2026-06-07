@@ -107,6 +107,25 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 - Post-push correction:
   - The first pushed Agent release workflow failed before creating jobs because the `INSTALL.txt` heredoc content was not indented as valid YAML block scalar content.
   - Fixed `.github/workflows/agent-release.yml` heredoc indentation and validated it locally with the repository YAML CLI.
+- Committed and pushed:
+  - `933934c Improve agent UX and nodes panel`
+  - `71efb8e Fix agent release workflow yaml`
+- GitHub Actions:
+  - Run `27082167680` for `933934c`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+  - Run `27082167445` for the first Agent release workflow parse attempt: failed before jobs due invalid YAML heredoc indentation.
+  - Run `27082217669` for `71efb8e`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`; this also validated Rust Agent compilation inside the Docker build.
+- Deployment after Agent UX and Nodes UI work:
+  - `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+  - `docker compose up -d`: recreated and started `pulsedeck-panel`.
+  - `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed with `name: PulseDeck` and `port: 14770`.
+- Post-deploy smoke passed against the Compose deployment:
+  - Login with `admin / change-me` succeeded.
+  - Created a temporary smoke node and verified the generated Agent install script includes `pk menu`, `pk info`, `pk update-check`, and `pk uninstall --yes`.
+  - Added a VLESS Reality protocol with custom port `24443` and gRPC settings; confirmed `protocol-add` was queued.
+  - Queued `sing-box-apply` and `sing-box-install` with version `1.11.15`.
+  - Verified Rust Agent runtime downloads from the deployed image: `linux-x64` 762320 bytes, `linux-arm64` 645320 bytes, and `linux-armv7l` 678964 bytes.
+  - Deleted the temporary smoke node after verification.
 
 - Implementation direction for this turn:
   - Continue the remaining worklog items after command streaming and GeoIP/Geosite.
