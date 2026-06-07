@@ -98,6 +98,7 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - Bumped panel and Agent metadata to `0.2.2` / `0.2.2-rust`.
   - Initial `v0.2.1` tag pushed successfully and panel image tag build passed, but Agent release run `27084362477` failed because `rust:1.87-alpine` no longer provided `rustup`/`cargo` in that Docker run context.
   - Fixed Agent build infrastructure by switching both the panel Dockerfile Agent build stage and Agent release workflow to `rust:1.87-bookworm`, then moved forward with `v0.2.2` instead of force-moving the already-pushed `v0.2.1` tag.
+  - `v0.2.2` Agent release run `27084588013` then exposed the actual workflow issue: `docker run ... sh -lc` starts a login shell and resets PATH so `/usr/local/cargo/bin` is hidden. Changed the release workflow to `sh -c`; the existing `v0.2.2` tag will be released through workflow dispatch instead of moving the tag.
 - Local verification before commit:
   - `npm run check:api`: passed.
   - `npm test`: passed, 11 tests.
