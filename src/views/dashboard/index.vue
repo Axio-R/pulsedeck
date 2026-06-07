@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { fetchPulseDashboard, openPulseTrafficSocket, type PulseDashboard, type PulseTrafficEvent } from '@/service/api';
-import { formatBeijingTime, formatBytes, formatRate, regionBadge } from '@/utils/pulse-format';
+import { compactRegion, formatBeijingTime, formatBytes, formatRate, regionFlagUrl } from '@/utils/pulse-format';
 
 type TrafficSocketState = 'connecting' | 'live' | 'reconnecting' | 'offline';
 type TrafficSample = { time: number; rx: number; tx: number; totalRx: number; totalTx: number; total: number };
@@ -102,7 +102,11 @@ function applyTrafficEvent(event: PulseTrafficEvent) {
 }
 
 function displayRegion(node: PulseDashboard['recentNodes'][number]) {
-  return regionBadge(node.displayRegion || node.region || node.network?.detectedRegion || '', node.regionIcon);
+  return compactRegion(node.displayRegion || node.region || node.network?.detectedRegion || '');
+}
+
+function displayRegionFlag(node: PulseDashboard['recentNodes'][number]) {
+  return regionFlagUrl(displayRegion(node));
 }
 
 function commandLabel(type: string) {
@@ -266,7 +270,13 @@ onUnmounted(() => {
             <div v-for="node in dashboard.recentNodes" :key="node.id" class="operation-row">
               <div>
                 <div class="font-medium">{{ node.name }}</div>
-                <div class="text-12px text-gray-500">{{ displayRegion(node) }} · {{ formatBeijingTime(node.lastSeenAt) }}</div>
+                <div class="recent-node-meta">
+                  <span class="region-badge-text">
+                    <img class="region-flag-img" :src="displayRegionFlag(node)" alt="" />
+                    <span>{{ displayRegion(node) }}</span>
+                  </span>
+                  <span>{{ formatBeijingTime(node.lastSeenAt) }}</span>
+                </div>
               </div>
               <NTag :type="node.lastSeenAt ? 'success' : 'warning'" size="small">
                 {{ node.online ? '在线' : node.agentStatus }}
@@ -382,6 +392,40 @@ onUnmounted(() => {
   color: var(--n-text-color-disabled, #64748b);
   font-size: 12px;
   pointer-events: none;
+}
+
+.recent-node-meta,
+.region-badge-text {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.recent-node-meta {
+  gap: 8px;
+  color: var(--n-text-color-disabled, #64748b);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.region-badge-text {
+  gap: 6px;
+  flex: 0 0 auto;
+  color: var(--n-text-color, #1f2937);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.region-flag-img {
+  display: block;
+  width: 20px;
+  height: 14px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 2px;
+  object-fit: cover;
+  background: #f8fafc;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
 }
 
 @media (max-width: 640px) {

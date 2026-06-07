@@ -5,12 +5,14 @@ import {
   deletePulseProfile,
   fetchPulseNodes,
   fetchPulseProfiles,
+  resetPulseProfileToken,
+  restorePulseDefaultProfiles,
   updatePulseProfile,
   type PulseNode,
   type PulseProfile
 } from '@/service/api';
 import { copyText } from '@/utils/clipboard';
-import { compactRegion, regionBadge } from '@/utils/pulse-format';
+import { compactRegion } from '@/utils/pulse-format';
 
 const loading = ref(false);
 const profiles = ref<PulseProfile[]>([]);
@@ -44,7 +46,7 @@ const regionOptions = computed(() => {
   const regions = nodes.value.map(node => compactRegion(node.displayRegion || node.region)).filter(Boolean);
   return [...new Set(regions)]
     .sort((a, b) => a.localeCompare(b))
-    .map(value => ({ label: regionBadge(value), value }));
+    .map(value => ({ label: value, value }));
 });
 const tagOptions = computed(() => uniqueOptions(nodes.value.flatMap(node => node.tags || [])));
 
@@ -96,9 +98,21 @@ async function toggle(profile: PulseProfile, enabled: boolean) {
 }
 
 async function remove(profile: PulseProfile) {
-  await deletePulseProfile(profile.id);
+  const result = await deletePulseProfile(profile.id);
   profiles.value = profiles.value.filter(item => item.id !== profile.id);
-  window.$message?.success('订阅已删除');
+  window.$message?.success(result.hidden ? '默认订阅已隐藏并停用' : '订阅已删除');
+}
+
+async function resetProfileUrl(profile: PulseProfile) {
+  const next = await resetPulseProfileToken(profile.id);
+  profiles.value = profiles.value.map(item => (item.id === profile.id ? next : item));
+  window.$message?.success('订阅链接已重置');
+}
+
+async function restoreDefaults() {
+  const result = await restorePulseDefaultProfiles();
+  profiles.value = result.items;
+  window.$message?.success(result.restored ? `已恢复 ${result.restored} 个默认订阅` : '默认订阅已在列表中');
 }
 
 function draftFor(profile: PulseProfile) {
@@ -209,6 +223,12 @@ onMounted(loadData);
           <NSpace class="mt-12px">
             <NButton size="small" @click="copyUrl(profile.publicUrl)">复制</NButton>
             <NButton size="small" tag="a" :href="profile.publicUrl" target="_blank">打开</NButton>
+            <NPopconfirm @positive-click="resetProfileUrl(profile)">
+              <template #trigger>
+                <NButton size="small" secondary>重置链接</NButton>
+              </template>
+              重置 {{ profile.name }} 的订阅 URL？旧地址会失效。
+            </NPopconfirm>
             <NPopover trigger="click" placement="top">
               <template #trigger>
                 <NButton size="small" secondary>过滤</NButton>
@@ -230,17 +250,18 @@ onMounted(loadData);
               </NSpace>
             </NPopover>
             <NSwitch :value="profile.enabled" @update:value="value => toggle(profile, value)" />
-            <NPopconfirm v-if="profile.deletable" @positive-click="remove(profile)">
+            <NPopconfirm @positive-click="remove(profile)">
               <template #trigger>
                 <NButton size="small" type="error" secondary>删除</NButton>
               </template>
-              删除这个订阅 URL？
+              {{ profile.deletable ? '删除这个订阅 URL？' : '隐藏并停用这个默认订阅 URL？' }}
             </NPopconfirm>
-            <NTag v-else size="small" type="info">默认保护</NTag>
           </NSpace>
         </NCard>
       </NGi>
     </NGrid>
+
+    <NButton size="small" secondary @click="restoreDefaults">恢复默认订阅</NButton>
   </NSpace>
 </template>
 

@@ -96,8 +96,8 @@ test('health reports PulseDeck on default product port', async () => {
     const { res, body } = await request(app.base, '/api/v1/health');
     assert.equal(res.status, 200);
     assert.equal(body.name, 'PulseDeck');
-    assert.equal(body.version, '0.2.13');
-    assert.equal(body.agentVersion, '0.2.13-rust');
+    assert.equal(body.version, '0.2.14');
+    assert.equal(body.agentVersion, '0.2.14-rust');
     assert.equal(body.port, 14770);
   } finally {
     await app.close();
@@ -109,7 +109,7 @@ test('agent runtime manifest exposes target metadata', async () => {
   try {
     const { res, body } = await request(app.base, '/api/v1/agents/runtime/manifest');
     assert.equal(res.status, 200);
-    assert.equal(body.agentVersion, '0.2.13-rust');
+    assert.equal(body.agentVersion, '0.2.14-rust');
     assert.ok(Array.isArray(body.targets));
     assert.deepEqual(
       body.targets.map((target) => target.target),
@@ -124,7 +124,7 @@ test('agent runtime manifest exposes target metadata', async () => {
     const single = await request(app.base, '/api/v1/agents/runtime/manifest/linux-x64');
     assert.equal(single.res.status, 200);
     assert.equal(single.body.target, 'linux-x64');
-    assert.equal(single.body.version, '0.2.13-rust');
+    assert.equal(single.body.version, '0.2.14-rust');
   } finally {
     await app.close();
   }
@@ -480,7 +480,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.equal(discovered.displayRegion, 'GeoIP 未配置');
     assert.equal(discovered.agent.version, '0.1.0-rust');
     assert.equal(discovered.agent.target, 'linux-x64');
-    assert.equal(discovered.agent.latestVersion, '0.2.13-rust');
+    assert.equal(discovered.agent.latestVersion, '0.2.14-rust');
     assert.equal(discovered.agent.updateAvailable, true);
     assert.equal(discovered.agent.remoteUpdateSupported, false);
 
@@ -526,7 +526,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     await request(app.base, `/api/v1/agents/enroll/${warpNode.body.installId}`, {
       method: 'POST',
       body: {
-        version: '0.2.13-rust',
+        version: '0.2.14-rust',
         platform: 'linux',
         arch: 'x86_64',
         installDir: '/var/lib/pulsedeck',
@@ -669,7 +669,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
               status: 'update-available',
               target: 'linux-x64',
               currentVersion: '0.1.0-rust',
-              latestVersion: '0.2.13-rust',
+              latestVersion: '0.2.14-rust',
               available: true,
               updateAvailable: true
             }
@@ -682,7 +682,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     const withAgentUpdate = listedAfterAgentCheck.body.items.find((node) => node.id === created.body.id);
     assert.equal(withAgentUpdate.agent.update.status, 'update-available');
     assert.equal(withAgentUpdate.agent.update.updateAvailable, true);
-    assert.equal(withAgentUpdate.agent.update.latestVersion, '0.2.13-rust');
+    assert.equal(withAgentUpdate.agent.update.latestVersion, '0.2.14-rust');
 
     const eventsAfterResult = await request(app.base, `/api/v1/commands/${protocolCommand.id}/events?format=json`, { headers: auth });
     assert.ok(eventsAfterResult.body.items.some((event) => event.type === 'result'));
@@ -1235,11 +1235,27 @@ test('subscription profiles protect defaults and delete custom profiles', async 
     const defaultRaw = defaults.body.items.find((profile) => profile.id === 'default-raw');
     assert.equal(defaultRaw.deletable, false);
 
-    const blocked = await request(app.base, `/api/v1/subscription-profiles/${defaultRaw.id}`, {
+    const resetDefault = await request(app.base, `/api/v1/subscription-profiles/${defaultRaw.id}/token/reset`, {
+      method: 'POST',
+      headers: auth
+    });
+    assert.equal(resetDefault.res.status, 200);
+    assert.notEqual(resetDefault.body.token, defaultRaw.token);
+
+    const hiddenDefault = await request(app.base, `/api/v1/subscription-profiles/${defaultRaw.id}`, {
       method: 'DELETE',
       headers: auth
     });
-    assert.equal(blocked.res.status, 409);
+    assert.equal(hiddenDefault.res.status, 200);
+    assert.equal(hiddenDefault.body.hidden, true);
+    const visibleAfterHide = await request(app.base, '/api/v1/subscription-profiles', { headers: auth });
+    assert.equal(visibleAfterHide.body.items.some((profile) => profile.id === defaultRaw.id), false);
+    const restoredDefault = await request(app.base, '/api/v1/subscription-profiles/defaults/restore', {
+      method: 'POST',
+      headers: auth
+    });
+    assert.equal(restoredDefault.res.status, 200);
+    assert.ok(restoredDefault.body.items.some((profile) => profile.id === defaultRaw.id));
 
     const custom = await request(app.base, '/api/v1/subscription-profiles', {
       method: 'POST',
@@ -1256,7 +1272,7 @@ test('subscription profiles protect defaults and delete custom profiles', async 
     });
     const hkAgent = await request(app.base, `/api/v1/agents/enroll/${hkNode.body.installId}`, {
       method: 'POST',
-      body: { version: '0.2.13-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
+      body: { version: '0.2.14-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
     });
     await request(app.base, `/api/v1/agents/${hkAgent.body.agentId}/metrics`, {
       method: 'POST',
@@ -1270,7 +1286,7 @@ test('subscription profiles protect defaults and delete custom profiles', async 
     });
     const usAgent = await request(app.base, `/api/v1/agents/enroll/${usNode.body.installId}`, {
       method: 'POST',
-      body: { version: '0.2.13-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
+      body: { version: '0.2.14-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
     });
     await request(app.base, `/api/v1/agents/${usAgent.body.agentId}/metrics`, {
       method: 'POST',

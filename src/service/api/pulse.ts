@@ -82,6 +82,7 @@ export interface PulseNode {
     target: string;
     available: boolean;
     updateAvailable: boolean;
+    restartScheduled?: boolean;
     status: string;
     message: string;
     checkedAt: string | null;
@@ -106,6 +107,7 @@ export interface PulseNode {
       target?: string;
       available?: boolean;
       updateAvailable?: boolean;
+      restartScheduled?: boolean;
       status?: string;
       message?: string;
       checkedAt?: string | null;
@@ -308,6 +310,7 @@ export interface PulseProfile {
   enabled: boolean;
   protected: boolean;
   deletable: boolean;
+  hidden: boolean;
   description: string;
   filters: {
     nodeIds: string[];
@@ -503,7 +506,15 @@ export function updatePulseProfile(
 }
 
 export function deletePulseProfile(id: string) {
-  return pulseFetch<{ deleted: boolean }>(`/subscription-profiles/${id}`, { method: 'DELETE' });
+  return pulseFetch<{ deleted: boolean; hidden?: boolean }>(`/subscription-profiles/${id}`, { method: 'DELETE' });
+}
+
+export function resetPulseProfileToken(id: string) {
+  return pulseFetch<PulseProfile>(`/subscription-profiles/${id}/token/reset`, { method: 'POST' });
+}
+
+export function restorePulseDefaultProfiles() {
+  return pulseFetch<{ restored: number; items: PulseProfile[] }>('/subscription-profiles/defaults/restore', { method: 'POST' });
 }
 
 export function fetchPulseChannels() {

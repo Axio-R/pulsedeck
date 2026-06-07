@@ -26,7 +26,7 @@ import {
   type PulseTrafficRankItem
 } from '@/service/api';
 import { copyText } from '@/utils/clipboard';
-import { compactRegion, formatBeijingTime, formatBytes, formatRate, regionBadge, regionFlag } from '@/utils/pulse-format';
+import { compactRegion, formatBeijingTime, formatBytes, formatRate, regionFlagUrl } from '@/utils/pulse-format';
 
 type ProtocolDraft = { type: string; port: number | null; listen: string; variant: string; settingsJson: string };
 type TrafficDraft = {
@@ -75,7 +75,10 @@ const columns = computed<DataTableColumns<PulseNode>>(() => [
     key: 'region',
     width: 118,
     render(row: PulseNode) {
-      return h('span', { class: 'region-badge-text', title: displayNodeRegion(row) }, regionBadgeLabel(row));
+      return h('span', { class: 'region-badge-text', title: displayNodeRegion(row) }, [
+        h('img', { class: 'region-flag-img', src: regionFlagImage(row), alt: '' }),
+        h('span', regionBadgeLabel(row))
+      ]);
     }
   },
   {
@@ -148,15 +151,15 @@ const columns = computed<DataTableColumns<PulseNode>>(() => [
   {
     title: '操作',
     key: 'actions',
-    width: 270,
+    width: 230,
     render(row: PulseNode) {
       return h('div', { class: 'table-actions' }, [
-        h(NButton, { size: 'small', onClick: () => openInstallDrawer(row) }, { default: () => '安装命令' }),
-        h(NButton, { size: 'small', type: 'primary', secondary: true, onClick: () => queue(row, 'sing-box-apply') }, { default: () => '应用配置' }),
+        h(NButton, { size: 'small', onClick: () => openInstallDrawer(row) }, { default: () => '安装' }),
+        h(NButton, { size: 'small', type: 'primary', secondary: true, onClick: () => queue(row, 'sing-box-apply') }, { default: () => '下发' }),
         h(
           NDropdown,
           { options: nodeMoreActionOptions(row), trigger: 'click', onSelect: (key: string) => handleNodeAction(row, key) },
-          { default: () => h(NButton, { size: 'small' }, { default: () => '更多' }) }
+          { default: () => h(NButton, { size: 'small' }, { default: () => '维护' }) }
         ),
         h(
           NPopconfirm,
@@ -258,22 +261,17 @@ async function queue(node: PulseNode, type: string) {
 
 function nodeMoreActionOptions(node: PulseNode) {
   return [
+    { label: '重新下发配置', key: 'sing-box-apply' },
+    { label: '探测状态', key: 'probe' },
+    { type: 'divider', key: 'divider-main' },
+    { label: '更新并重启 Agent', key: 'agent-update', disabled: !canRemoteUpdateAgent(node) },
+    { label: '重启 Agent', key: 'restart' },
+    { label: '安装或更新 sing-box', key: 'sing-box-reinstall' },
+    { label: '重启 sing-box', key: 'sing-box-restart' },
+    { type: 'divider', key: 'divider-copy' },
     { label: '复制安装命令', key: 'copy-install' },
     { label: '复制节点 IP', key: 'copy-ips' },
     { label: '复制上报链接', key: 'copy-links', disabled: !node.reportedLinks?.length },
-    { type: 'divider', key: 'divider-copy' },
-    { label: '探测节点', key: 'probe' },
-    { label: '诊断节点', key: 'diagnostics' },
-    { label: '渲染配置', key: 'sing-box-render' },
-    { label: '应用配置', key: 'sing-box-apply' },
-    { type: 'divider', key: 'divider-agent' },
-    { label: '检查 Agent 更新', key: 'agent-update-check', disabled: !canRemoteUpdateAgent(node) },
-    { label: '更新 Agent', key: 'agent-update', disabled: !canRemoteUpdateAgent(node) },
-    { label: '重启 Agent', key: 'restart' },
-    { type: 'divider', key: 'divider-singbox' },
-    { label: '安装 sing-box', key: 'sing-box-install' },
-    { label: '强制更新 sing-box', key: 'sing-box-reinstall' },
-    { label: '重启 sing-box', key: 'sing-box-restart' },
     { label: '重置订阅链接', key: 'reset-links' },
     { type: 'divider', key: 'divider-order' },
     { label: '上移节点', key: 'move-up' },
@@ -310,6 +308,22 @@ async function batchAgentQueue(type: 'agent-update-check' | 'agent-update') {
   }
   const result = await batchPulseNodeCommand(nodeIds, type);
   window.$message?.success(`已批量下发 ${result.queued} 条${commandLabel(type)}命令`);
+}
+
+function batchActionOptions() {
+  return [
+    { label: '批量探测状态', key: 'probe' },
+    { label: '批量下发配置', key: 'sing-box-apply' },
+    { label: '批量更新并重启 Agent', key: 'agent-update' },
+    { type: 'divider', key: 'divider' },
+    { label: '清零所选流量', key: 'traffic-reset' }
+  ];
+}
+
+async function handleBatchAction(key: string) {
+  if (key === 'agent-update') return batchAgentQueue('agent-update');
+  if (key === 'traffic-reset') return resetSelectedTraffic();
+  return batchQueue(key);
 }
 
 async function batchDelete() {
@@ -533,12 +547,12 @@ function displayNodeRegion(node: PulseNode) {
   return compactRegion(node.displayRegion || node.region || node.network?.detectedRegion || '');
 }
 
-function regionIconLabel(node: PulseNode) {
-  return node.regionIcon && node.regionIcon !== 'AUTO' ? node.regionIcon : regionFlag(displayNodeRegion(node));
+function regionBadgeLabel(node: PulseNode) {
+  return displayNodeRegion(node);
 }
 
-function regionBadgeLabel(node: PulseNode) {
-  return regionBadge(displayNodeRegion(node), regionIconLabel(node));
+function regionFlagImage(node: PulseNode) {
+  return regionFlagUrl(displayNodeRegion(node));
 }
 
 function agentVersionLabel(node: PulseNode) {
@@ -548,7 +562,7 @@ function agentVersionLabel(node: PulseNode) {
 function agentUpdateLabel(node: PulseNode) {
   const update = node.agent?.update || node.agentUpdate;
   if (node.agent?.updateAvailable || update?.updateAvailable) return `可更新 ${node.agent?.latestVersion || update?.latestVersion || ''}`.trim();
-  if (update?.status === 'updated') return '已更新待重启';
+  if (update?.status === 'updated') return update.restartScheduled ? '已更新重启中' : '已更新待重启';
   if (update?.status === 'unavailable') return '目标包未发布';
   if (node.agent?.runtimeAvailable === false) return '运行时未发布';
   return node.agent?.version && node.agent.version !== 'unknown' ? '最新' : '待上报';
@@ -603,8 +617,8 @@ function commandLabel(type: string) {
     probe: '探测',
     diagnostics: '诊断',
     restart: '重启 Agent',
-    'agent-update-check': '检查 Agent',
-    'agent-update': '更新 Agent',
+    'agent-update-check': '检查 Agent 更新',
+    'agent-update': '更新并重启 Agent',
     'sing-box-render': '渲染配置',
     'sing-box-apply': '应用配置',
     'sing-box-restart': '重启 sing-box',
@@ -855,12 +869,11 @@ onUnmounted(() => {
       </template>
       <div class="bulk-toolbar">
         <NSelect v-model:value="groupFilter" size="small" :options="groupOptions" class="toolbar-select" />
-        <NButton size="small" secondary @click="batchQueue('probe')">批量探测</NButton>
-        <NButton size="small" secondary @click="batchQueue('diagnostics')">批量诊断</NButton>
-        <NButton size="small" secondary @click="batchAgentQueue('agent-update-check')">批量检查 Agent</NButton>
-        <NButton size="small" type="primary" secondary @click="batchAgentQueue('agent-update')">批量更新 Agent</NButton>
-        <NButton size="small" type="primary" secondary @click="batchQueue('sing-box-apply')">批量应用</NButton>
-        <NButton size="small" secondary @click="resetSelectedTraffic">清零流量</NButton>
+        <NDropdown :options="batchActionOptions()" trigger="click" @select="key => handleBatchAction(String(key))">
+          <template #trigger>
+            <NButton size="small" secondary>批量操作</NButton>
+          </template>
+        </NDropdown>
         <NPopconfirm @positive-click="batchDelete">
           <template #trigger>
             <NButton size="small" type="error" secondary>批量删除</NButton>
@@ -935,7 +948,10 @@ onUnmounted(() => {
           <div class="node-head">
             <div class="node-title-block">
               <div class="node-title-row">
-                <span class="region-badge-text">{{ regionBadgeLabel(node) }}</span>
+                <span class="region-badge-text">
+                  <img class="region-flag-img" :src="regionFlagImage(node)" alt="" />
+                  <span>{{ regionBadgeLabel(node) }}</span>
+                </span>
                 <div class="node-title">{{ node.name }}</div>
               </div>
               <div class="node-subtitle">{{ ipModeLabel(node.network?.ipMode) }}</div>
@@ -1138,7 +1154,7 @@ onUnmounted(() => {
             </NPopover>
             <NDropdown :options="nodeMoreActionOptions(node)" trigger="click" @select="key => handleNodeAction(node, String(key))">
               <template #trigger>
-                <NButton size="small">更多</NButton>
+                <NButton size="small">维护</NButton>
               </template>
             </NDropdown>
             <NPopconfirm @positive-click="removeNode(node)">
@@ -1222,13 +1238,25 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: 4px;
+  gap: 6px;
   min-width: 54px;
   color: var(--n-text-color, #1f2937);
   font-size: 12px;
   font-weight: 700;
   line-height: 18px;
   white-space: nowrap;
+}
+
+.region-flag-img {
+  display: block;
+  width: 20px;
+  height: 14px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 2px;
+  object-fit: cover;
+  background: #f8fafc;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
 }
 
 .region-icon {

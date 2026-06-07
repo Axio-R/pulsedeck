@@ -19,6 +19,7 @@ export const DEFAULT_SUBSCRIPTION_PROFILES = [
     format: 'raw',
     enabled: true,
     protected: true,
+    hidden: false,
     description: '通用原始链接订阅',
     filters: {},
     linkPrefixMode: 'region'
@@ -29,6 +30,7 @@ export const DEFAULT_SUBSCRIPTION_PROFILES = [
     format: 'clash',
     enabled: true,
     protected: true,
+    hidden: false,
     description: 'Clash provider 输出',
     filters: {},
     linkPrefixMode: 'region'
@@ -39,6 +41,7 @@ export const DEFAULT_SUBSCRIPTION_PROFILES = [
     format: 'v2ray',
     enabled: true,
     protected: true,
+    hidden: false,
     description: 'Base64 链接订阅',
     filters: {},
     linkPrefixMode: 'region'
@@ -364,6 +367,7 @@ export function hydrateData(input) {
     ...profile,
     filters: normalizeSubscriptionFilters(profile.filters),
     linkPrefixMode: normalizeLinkPrefixMode(profile.linkPrefixMode),
+    hidden: profile.hidden === true,
     description: String(profile.description || '').trim()
   }));
 

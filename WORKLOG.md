@@ -83,6 +83,22 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 
 ## Log
 
+### 2026-06-07 (`v0.2.14`)
+
+- Implementation direction for `v0.2.14`:
+  - Replace emoji-only region display with local SVG flag icons so flags are visible even when the browser/system lacks color emoji support.
+  - Clarify Agent remote update behavior by reporting whether the Agent restart was scheduled after update.
+  - Make subscription URLs easier to manage: reset tokens, delete custom subscriptions, hide built-in subscriptions, and restore hidden built-ins.
+  - Reduce node-management clutter by hiding the placeholder sing-box configuration page from the menu and consolidating low-frequency node operations.
+- Implementation completed before commit:
+  - Added local SVG flag data URLs for common node regions and switched node cards, node tables, and dashboard recent nodes to image-based flag badges.
+  - Simplified node card/table operation labels and moved low-frequency actions into a smaller `维护` menu.
+  - Collapsed batch node actions into a single `批量操作` menu.
+  - Added structured `restartScheduled` data to Agent update results and surfaced the state as `已更新重启中` in node cards.
+  - Added subscription profile token reset, built-in profile hide/delete behavior, and built-in profile restore endpoint and UI actions.
+  - Hid the standalone sing-box configuration page from the sidebar because protocol and maintenance controls now live in node management.
+  - Bumped panel and Agent metadata to `0.2.14` / `0.2.14-rust`.
+
 ### 2026-06-07 (`v0.2.13`)
 
 - Implementation direction for `v0.2.13`:

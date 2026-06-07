@@ -17,7 +17,7 @@ const DEFAULT_GEOIP_FILE = path.join(ROOT_DIR, 'geoip.json');
 const DEFAULT_GEOSITE_FILE = path.join(ROOT_DIR, 'geosite.json');
 const PORT = Number(process.env.PULSEDECK_PORT || 14770);
 const HOST = process.env.PULSEDECK_HOST || '0.0.0.0';
-const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.13';
+const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.14';
 const AGENT_VERSION = process.env.PULSEDECK_AGENT_VERSION || `${APP_VERSION}-rust`;
 const AGENT_RUNTIME_TARGETS = ['linux-x64', 'linux-arm64', 'linux-armv7l'];
 const ADMIN_USER = process.env.PULSEDECK_ADMIN_USER || 'admin';
@@ -173,6 +173,7 @@ function presentProfile(profile, req) {
     filters: normalizeSubscriptionFilters(profile.filters),
     linkPrefixMode: normalizeLinkPrefixMode(profile.linkPrefixMode),
     deletable: profile.protected !== true,
+    hidden: profile.hidden === true,
     publicUrl: `${base}/sub/${profile.token}`
   };
 }
@@ -2305,6 +2306,7 @@ function applyCommandResultSideEffects(draft, command, result) {
       target: String(data.agentUpdate.target || ''),
       available: data.agentUpdate.available === true,
       updateAvailable: data.agentUpdate.updateAvailable === true,
+      restartScheduled: data.agentUpdate.restartScheduled === true || data.restartScheduled === true,
       status: String(data.agentUpdate.status || ''),
       message: String(data.agentUpdate.message || data.message || ''),
       checkedAt: data.agentUpdate.checkedAt || timestamp,
@@ -3375,7 +3377,9 @@ async function handleApi(req, res, store, url, realtime = {}) {
   }
 
   if (method === 'GET' && url.pathname === '/api/v1/subscription-profiles') {
-    return sendJson(res, 200, { items: data.subscriptionProfiles.map((profile) => presentProfile(profile, req)) });
+    const includeHidden = ['1', 'true', 'yes'].includes(String(url.searchParams.get('includeHidden') || '').toLowerCase());
+    const profiles = data.subscriptionProfiles.filter((profile) => includeHidden || profile.hidden !== true);
+    return sendJson(res, 200, { items: profiles.map((profile) => presentProfile(profile, req)) });
   }
 
   if (method === 'POST' && url.pathname === '/api/v1/subscription-profiles') {
@@ -3389,6 +3393,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
         format,
         enabled: body.enabled !== false,
         protected: false,
+        hidden: false,
         description: String(body.description || '').trim(),
         filters: normalizeSubscriptionFilters(body.filters),
         linkPrefixMode: normalizeLinkPrefixMode(body.linkPrefixMode),
@@ -3414,17 +3419,56 @@ async function handleApi(req, res, store, url, realtime = {}) {
       if (body.format !== undefined && !profile.protected && ['raw', 'clash', 'v2ray'].includes(body.format)) profile.format = body.format;
       if (body.filters !== undefined) profile.filters = normalizeSubscriptionFilters(body.filters);
       if (body.linkPrefixMode !== undefined) profile.linkPrefixMode = normalizeLinkPrefixMode(body.linkPrefixMode);
+      if (body.hidden !== undefined) profile.hidden = body.hidden === true;
       profile.updatedAt = nowIso();
     });
     if (!profile) return notFound(res);
     return sendJson(res, 200, presentProfile(profile, req));
   }
 
+  if (method === 'POST' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'subscription-profiles' && segments[3] && segments[4] === 'token' && segments[5] === 'reset') {
+    const profileId = segments[3];
+    let profile;
+    await store.update((draft) => {
+      profile = draft.subscriptionProfiles.find((item) => item.id === profileId);
+      if (!profile) return;
+      profile.token = randomToken(18);
+      profile.hidden = false;
+      profile.updatedAt = nowIso();
+    });
+    if (!profile) return notFound(res);
+    return sendJson(res, 200, presentProfile(profile, req));
+  }
+
+  if (method === 'POST' && url.pathname === '/api/v1/subscription-profiles/defaults/restore') {
+    let restored = 0;
+    await store.update((draft) => {
+      for (const profile of draft.subscriptionProfiles) {
+        if (profile.protected && profile.hidden === true) {
+          profile.hidden = false;
+          profile.enabled = true;
+          profile.updatedAt = nowIso();
+          restored += 1;
+        }
+      }
+    });
+    return sendJson(res, 200, { restored, items: store.data.subscriptionProfiles.filter((profile) => profile.hidden !== true).map((profile) => presentProfile(profile, req)) });
+  }
+
   if (method === 'DELETE' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'subscription-profiles' && segments[3]) {
     const profileId = segments[3];
     const profile = data.subscriptionProfiles.find((item) => item.id === profileId);
     if (!profile) return notFound(res);
-    if (profile.protected) return conflict(res, 'default subscription profiles are protected; disable them instead');
+    if (profile.protected) {
+      await store.update((draft) => {
+        const target = draft.subscriptionProfiles.find((item) => item.id === profileId);
+        if (!target) return;
+        target.hidden = true;
+        target.enabled = false;
+        target.updatedAt = nowIso();
+      });
+      return sendJson(res, 200, { deleted: true, hidden: true });
+    }
     await store.update((draft) => {
       draft.subscriptionProfiles = draft.subscriptionProfiles.filter((item) => item.id !== profileId);
     });

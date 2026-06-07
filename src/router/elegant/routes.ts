@@ -126,7 +126,8 @@ export const generatedRoutes: GeneratedRoute[] = [
       title: 'sing-box 配置',
       icon: 'mdi:cog-transfer-outline',
       order: 3,
-      i18nKey: 'route.sing-box'
+      i18nKey: 'route.sing-box',
+      hideInMenu: true
     }
   },
   {

@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const VERSION: &str = "0.2.13-rust";
+const VERSION: &str = "0.2.14-rust";
 const DEFAULT_SING_BOX_VERSION: &str = "1.11.15";
 
 #[derive(Clone, Debug)]
@@ -1277,6 +1277,7 @@ fn agent_update_check_result(config: &Config) -> Result<String, String> {
         &manifest.sha256,
         &runtime_download_url(config, &target, Some(&manifest)),
         "",
+        false,
     ))
 }
 
@@ -1300,6 +1301,7 @@ fn agent_update_result(config: &Config) -> Result<String, String> {
         &outcome.sha256,
         &outcome.download_url,
         &outcome.backup,
+        restart.requested,
     ))
 }
 
@@ -1415,17 +1417,20 @@ fn agent_update_json(
     sha256: &str,
     download_url: &str,
     backup_path: &str,
+    restart_scheduled: bool,
 ) -> String {
     format!(
-        "{{\"message\":\"{}\",\"agentVersion\":\"{}\",\"agentUpdate\":{{\"status\":\"{}\",\"target\":\"{}\",\"currentVersion\":\"{}\",\"latestVersion\":\"{}\",\"available\":{},\"updateAvailable\":{},\"sizeBytes\":{},\"sha256\":\"{}\",\"downloadUrl\":\"{}\",\"backupPath\":\"{}\",\"checkedAt\":\"{}\",\"updatedAt\":\"{}\"}}}}",
+        "{{\"message\":\"{}\",\"agentVersion\":\"{}\",\"restartScheduled\":{},\"agentUpdate\":{{\"status\":\"{}\",\"target\":\"{}\",\"currentVersion\":\"{}\",\"latestVersion\":\"{}\",\"available\":{},\"updateAvailable\":{},\"restartScheduled\":{},\"sizeBytes\":{},\"sha256\":\"{}\",\"downloadUrl\":\"{}\",\"backupPath\":\"{}\",\"checkedAt\":\"{}\",\"updatedAt\":\"{}\"}}}}",
         json_escape(message),
         json_escape(VERSION),
+        if restart_scheduled { "true" } else { "false" },
         json_escape(status),
         json_escape(target),
         json_escape(current_version),
         json_escape(latest_version),
         if available { "true" } else { "false" },
         if update_available { "true" } else { "false" },
+        if restart_scheduled { "true" } else { "false" },
         size_bytes,
         json_escape(sha256),
         json_escape(download_url),
