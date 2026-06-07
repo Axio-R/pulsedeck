@@ -105,6 +105,19 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm build`: passed.
   - Local `cargo check --manifest-path apps/agent/Cargo.toml` could not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
   - No local Docker image build was performed.
+- Committed and pushed `6e69564 Add Rust sing-box command runner` to `origin/main`.
+- GitHub Actions run `27080453920` for commit `6e69564`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+- `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+- `docker compose up -d`: recreated and started `pulsedeck-panel`.
+- `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+- `GET http://127.0.0.1:14770/api/v1/health`: passed with `name: PulseDeck` and `port: 14770`.
+- Post-deploy smoke passed against the Compose deployment:
+  - Login with `admin / change-me` succeeded.
+  - Created and enrolled a temporary node with a public IPv4 address.
+  - Added a VLESS protocol and confirmed the Agent command response included the node protocol snapshot.
+  - Posted a simulated Agent command result and confirmed node `reportedLinks` and `singBox.status` were updated.
+  - Verified Rust Agent runtime downloads from the deployed image: `linux-x64` 680400 bytes, `linux-arm64` 578056 bytes, and `linux-armv7l` 607988 bytes.
+  - Deleted the temporary smoke node after verification.
 
 - User clarified the PulseDeck product capability target for the current project:
   - One-command Agent deployment and automatic node information reporting.
