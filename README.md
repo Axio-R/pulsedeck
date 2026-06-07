@@ -31,4 +31,4 @@ The panel API remains a dependency-light Node.js control plane. The Agent is a R
 
 The Rust Agent can render/apply sing-box configs for the supported protocol records. Production TLS/Reality variants require the corresponding settings JSON, such as SNI, certificate/key paths, or Reality private/public key material.
 
-Agent runtime metadata is exposed at `/api/v1/agents/runtime/manifest`. `pk update-check` reports the panel runtime version, size, and SHA-256, and `pk update` verifies the downloaded binary before replacing the local Agent.
+Agent runtime metadata is exposed at `/api/v1/agents/runtime/manifest`. `pk` opens the interactive Agent menu, `pk status` prints the quick status view, `pk update-check` reports the panel runtime version, size, and SHA-256, and `pk update` verifies the downloaded binary before replacing the local Agent.

@@ -86,6 +86,26 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 ### 2026-06-07
 
 - Implementation direction for this turn:
+  - Address real VPS feedback after `0.2.2`: the install path works, but `pk` without arguments did not open an interactive menu, CPU usage stayed blank, region text stayed at an ambiguous auto-detect state, and command push failures were not self-explanatory in the panel.
+  - Prepare a suitable `v0.2.3` patch release after verification and deployment.
+- Implementation completed before commit:
+  - Changed Rust Agent CLI so `pk` without arguments opens the interactive menu; `pk status` remains the quick status view and `pk help` shows usage.
+  - Updated installer completion hints to say `pk, pk status, pk info...` so operators naturally enter the menu.
+  - Added Rust Agent CPU usage collection from `/proc/stat` with a short sampling window; restricted containers still degrade to `null`.
+  - Changed local Agent status copy from `rust-native planned` to `rust-native active`.
+  - Made Agent command progress events include the real failure message when a remote action fails.
+  - Made backend command result events extract and display `result.data.message`, so command drawers show actionable errors such as missing sing-box instead of only `command failed`.
+  - Changed region display fallback: without a mounted GeoIP database, nodes now show `GeoIP 未配置`; lookup misses show `GeoIP 未命中`; nodes with no address show `等待 Agent 上报`.
+  - Bumped panel and Agent metadata to `0.2.3` / `0.2.3-rust`.
+- Local verification before commit:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 11 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `git diff --check`: passed.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: could not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+
+- Implementation direction for this turn:
   - Continue remaining release/deployment work by making Agent runtime publishing observable and verifiable before cutting the next patch version.
   - Add a panel runtime manifest, installer checksum verification, Agent update-check/update metadata, and a compact Settings UI view for release/runtime state.
   - Prepare `v0.2.2` after verification, push through GitHub Actions/GHCR, redeploy by Compose pull/up, and smoke test the release.

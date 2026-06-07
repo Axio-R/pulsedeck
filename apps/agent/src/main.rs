@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const VERSION: &str = "0.2.2-rust";
+const VERSION: &str = "0.2.3-rust";
 
 #[derive(Clone, Debug)]
 struct Config {
@@ -88,7 +88,9 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let command = env::args().nth(1).unwrap_or_else(|| "status".to_string());
+    let Some(command) = env::args().nth(1) else {
+        return menu();
+    };
     match command.as_str() {
         "daemon" | "run" => run_daemon(),
         "once" | "probe" => {
@@ -126,10 +128,12 @@ fn run() -> Result<(), String> {
             println!("{VERSION}");
             Ok(())
         }
-        _ => {
+        "help" | "-h" | "--help" => {
             println!("Usage: pk [status|info|menu|once|logs|doctor|install-service|service-status|stop|restart|update-check|update|uninstall|config|version]");
+            println!("Run `pk` without arguments to open the interactive menu.");
             Ok(())
         }
+        _ => menu(),
     }
 }
 
@@ -238,13 +242,18 @@ fn poll_commands(config: &Config, state: &State) -> Result<(), String> {
             "{}",
         );
         let (status, result) = execute_agent_command(config, state, &agent_command);
+        let event_message = if status == "failed" {
+            result_message(&result).unwrap_or_else(|| "command failed".to_string())
+        } else {
+            "command finished; uploading result".to_string()
+        };
         let _ = post_command_event(
             config,
             state,
             &agent_command,
             if status == "failed" { "error" } else { "progress" },
             if status == "failed" { "stderr" } else { "stdout" },
-            if status == "failed" { "command failed" } else { "command finished; uploading result" },
+            &event_message,
             &format!("{{\"status\":\"{}\"}}", json_escape(&status)),
         );
         post_json(
@@ -291,6 +300,16 @@ fn execute_agent_command(config: &Config, state: &State, agent_command: &AgentCo
                 json_escape(&agent_command.kind)
             ),
         ),
+    }
+}
+
+fn result_message(result_json: &str) -> Option<String> {
+    let message = json_get_string(result_json, "message")?;
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -447,13 +466,14 @@ fn collect_metrics_json() -> String {
         0.0
     };
     let (load_one, load_five, load_fifteen) = parse_loadavg(&loadavg);
+    let cpu_usage = cpu_usage_percent_json();
     let uptime_seconds = uptime
         .split_whitespace()
         .next()
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(0.0);
     format!(
-        "{{\"collectedAt\":\"{}\",\"platform\":\"{}\",\"arch\":\"{}\",\"release\":\"{}\",\"hostname\":\"{}\",\"uptimeSeconds\":{},\"cpu\":{{\"cores\":{},\"load\":{{\"one\":{},\"five\":{},\"fifteen\":{}}},\"usagePercent\":null}},\"memory\":{{\"totalBytes\":{},\"availableBytes\":{},\"usedBytes\":{},\"usagePercent\":{}}},\"network\":{{\"interfaces\":{},\"addresses\":{}}},\"collector\":{{\"runtime\":\"rust\",\"version\":\"{}\"}}}}",
+        "{{\"collectedAt\":\"{}\",\"platform\":\"{}\",\"arch\":\"{}\",\"release\":\"{}\",\"hostname\":\"{}\",\"uptimeSeconds\":{},\"cpu\":{{\"cores\":{},\"load\":{{\"one\":{},\"five\":{},\"fifteen\":{}}},\"usagePercent\":{}}},\"memory\":{{\"totalBytes\":{},\"availableBytes\":{},\"usedBytes\":{},\"usagePercent\":{}}},\"network\":{{\"interfaces\":{},\"addresses\":{}}},\"collector\":{{\"runtime\":\"rust\",\"version\":\"{}\"}}}}",
         json_escape(&now_string()),
         json_escape(os_name()),
         json_escape(arch_name()),
@@ -464,6 +484,7 @@ fn collect_metrics_json() -> String {
         load_one,
         load_five,
         load_fifteen,
+        cpu_usage,
         mem_total,
         mem_available,
         mem_used,
@@ -517,8 +538,8 @@ fn status() -> Result<(), String> {
     println!("agent: {}", mask(&state.agent_id));
     println!("node: {}", empty_dash(&state.node_name));
     println!("service: {}", empty_dash(&config.service_mode));
-    println!("last seen: {}", empty_dash(&state.last_seen_at));
-    println!("collector: rust-native planned, rust-control active");
+    println!("last seen: {}", display_seen_at(&state.last_seen_at));
+    println!("collector: rust-native active, rust-control active");
     Ok(())
 }
 
@@ -2419,6 +2440,40 @@ fn parse_loadavg(raw: &str) -> (f64, f64, f64) {
     )
 }
 
+fn cpu_usage_percent_json() -> String {
+    let Some(first) = read_cpu_totals() else {
+        return "null".to_string();
+    };
+    thread::sleep(Duration::from_millis(120));
+    let Some(second) = read_cpu_totals() else {
+        return "null".to_string();
+    };
+    let total_delta = second.0.saturating_sub(first.0);
+    let idle_delta = second.1.saturating_sub(first.1);
+    if total_delta == 0 || idle_delta > total_delta {
+        return "null".to_string();
+    }
+    let busy = total_delta - idle_delta;
+    let usage = (busy as f64 / total_delta as f64 * 1000.0).round() / 10.0;
+    format!("{usage:.1}")
+}
+
+fn read_cpu_totals() -> Option<(u64, u64)> {
+    let raw = fs::read_to_string("/proc/stat").ok()?;
+    let line = raw.lines().find(|line| line.starts_with("cpu "))?;
+    let values: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect();
+    if values.len() < 4 {
+        return None;
+    }
+    let idle = values.get(3).copied().unwrap_or(0) + values.get(4).copied().unwrap_or(0);
+    let total = values.iter().copied().sum();
+    Some((total, idle))
+}
+
 fn parse_netdev_json(raw: &str) -> String {
     let mut rows = Vec::new();
     for line in raw.lines().skip(2) {
@@ -2523,6 +2578,16 @@ fn empty_dash(value: &str) -> &str {
     } else {
         value
     }
+}
+
+fn display_seen_at(value: &str) -> String {
+    if value.trim().is_empty() {
+        return "-".to_string();
+    }
+    if value.chars().all(|ch| ch.is_ascii_digit()) {
+        return format!("{value} unix");
+    }
+    value.to_string()
 }
 
 #[allow(dead_code)]

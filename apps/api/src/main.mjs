@@ -17,7 +17,7 @@ const DEFAULT_GEOIP_FILE = path.join(ROOT_DIR, 'geoip.json');
 const DEFAULT_GEOSITE_FILE = path.join(ROOT_DIR, 'geosite.json');
 const PORT = Number(process.env.PULSEDECK_PORT || 14770);
 const HOST = process.env.PULSEDECK_HOST || '0.0.0.0';
-const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.2';
+const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.3';
 const AGENT_VERSION = process.env.PULSEDECK_AGENT_VERSION || `${APP_VERSION}-rust`;
 const AGENT_RUNTIME_TARGETS = ['linux-x64', 'linux-arm64', 'linux-armv7l'];
 const ADMIN_USER = process.env.PULSEDECK_ADMIN_USER || 'admin';
@@ -174,9 +174,19 @@ function presentNode(node, req, data) {
   return {
     ...node,
     online: isNodeOnline(node, data),
-    displayRegion: node.region || node.network?.detectedRegion || '自动识别中',
+    displayRegion: displayRegion(node),
     installCommand: `curl -fsSL '${publicBaseUrl(req)}/api/v1/agents/install/${encodeURIComponent(node.installId)}' | sh`
   };
+}
+
+function displayRegion(node) {
+  if (node.region) return node.region;
+  if (node.network?.detectedRegion) return node.network.detectedRegion;
+  const source = node.network?.regionSource || '';
+  if (source === 'geoip-empty') return 'GeoIP 未配置';
+  if (source === 'geoip-miss') return 'GeoIP 未命中';
+  if (node.network?.primaryIpv4 || node.network?.primaryIpv6) return '待手动设置区域';
+  return '等待 Agent 上报';
 }
 
 function agentNodeSnapshot(node) {
@@ -434,7 +444,8 @@ function analyzeAddresses(addresses = []) {
   else if (anyIpv4) ipMode = 'private-ipv4';
   else if (anyIpv6) ipMode = 'private-ipv6';
 
-  const geo = detectGeoRegion(publicIpv4?.address || publicIpv6?.address || '');
+  const lookupIp = publicIpv4?.address || publicIpv6?.address || '';
+  const geo = lookupIp ? detectGeoRegion(lookupIp) : { region: '', countryCode: '', city: '', source: 'auto-pending' };
   return {
     primaryIpv4,
     primaryIpv6,
@@ -442,7 +453,7 @@ function analyzeAddresses(addresses = []) {
     publicAddresses,
     warpLikely,
     detectedRegion: geo.region,
-    regionSource: geo.region ? geo.source : 'auto-pending',
+    regionSource: geo.source,
     updatedAt: nowIso()
   };
 }
@@ -481,7 +492,7 @@ function trafficSnapshot(data) {
       online: isNodeOnline(node, data),
       lastSeenAt: node.lastSeenAt,
       region: node.region,
-      displayRegion: node.region || node.network?.detectedRegion || '自动识别中',
+      displayRegion: displayRegion(node),
       subscriptionEnabled: node.subscriptionEnabled,
       metrics: node.metrics || null,
       traffic: node.traffic || {},
@@ -1096,6 +1107,12 @@ function applyCommandResultSideEffects(draft, command, result) {
   }
 }
 
+function commandResultMessage(result) {
+  const data = resultData(result);
+  const message = String(data.message || result?.message || '').trim();
+  return message || 'command failed';
+}
+
 function sendSseEvent(res, type, data) {
   res.write(`event: ${type}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -1532,7 +1549,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
           type: command.status === 'failed' ? 'error' : 'result',
           stream: command.status === 'failed' ? 'stderr' : 'result',
           agentId,
-          message: command.status === 'failed' ? 'command failed' : 'command succeeded',
+          message: command.status === 'failed' ? commandResultMessage(command.result) : 'command succeeded',
           payload: { status: command.status, result: command.result }
         });
         appendCommandEvent(draft, command, {

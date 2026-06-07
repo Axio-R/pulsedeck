@@ -93,8 +93,8 @@ test('health reports PulseDeck on default product port', async () => {
     const { res, body } = await request(app.base, '/api/v1/health');
     assert.equal(res.status, 200);
     assert.equal(body.name, 'PulseDeck');
-    assert.equal(body.version, '0.2.2');
-    assert.equal(body.agentVersion, '0.2.2-rust');
+    assert.equal(body.version, '0.2.3');
+    assert.equal(body.agentVersion, '0.2.3-rust');
     assert.equal(body.port, 14770);
   } finally {
     await app.close();
@@ -106,7 +106,7 @@ test('agent runtime manifest exposes target metadata', async () => {
   try {
     const { res, body } = await request(app.base, '/api/v1/agents/runtime/manifest');
     assert.equal(res.status, 200);
-    assert.equal(body.agentVersion, '0.2.2-rust');
+    assert.equal(body.agentVersion, '0.2.3-rust');
     assert.ok(Array.isArray(body.targets));
     assert.deepEqual(
       body.targets.map((target) => target.target),
@@ -121,7 +121,7 @@ test('agent runtime manifest exposes target metadata', async () => {
     const single = await request(app.base, '/api/v1/agents/runtime/manifest/linux-x64');
     assert.equal(single.res.status, 200);
     assert.equal(single.body.target, 'linux-x64');
-    assert.equal(single.body.version, '0.2.2-rust');
+    assert.equal(single.body.version, '0.2.3-rust');
   } finally {
     await app.close();
   }
@@ -168,7 +168,7 @@ test('node enrollment install script is LXC and Rust multi-arch aware', async ()
     assert.match(script.body, /openrc/);
     assert.match(script.body, /rc-service pulsedeck-agent restart/);
     assert.match(script.body, /PK/);
-    assert.match(script.body, /pk menu/);
+    assert.match(script.body, /Run `pk` without arguments|Use: pk, pk status/);
     assert.match(script.body, /pk info/);
     assert.match(script.body, /pk update-check/);
     assert.match(script.body, /RK/);
@@ -334,6 +334,8 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.equal(discovered.network.primaryIpv4, '198.51.100.10');
     assert.equal(discovered.network.primaryIpv6, '2001:4860:4860::8888');
     assert.equal(discovered.network.ipMode, 'dual-stack');
+    assert.equal(discovered.network.regionSource, 'geoip-empty');
+    assert.equal(discovered.displayRegion, 'GeoIP 未配置');
 
     const patched = await request(app.base, `/api/v1/nodes/${created.body.id}`, {
       method: 'PATCH',
@@ -419,6 +421,28 @@ test('nodes support automatic network discovery, protocol commands, and link res
     });
     assert.equal(reset.res.status, 201);
     assert.equal(reset.body.type, 'reset-links');
+
+    const queuedAfterReset = await request(app.base, `/api/v1/agents/${agentEnroll.body.agentId}/commands`, {
+      headers: { authorization: `Bearer ${agentEnroll.body.token}` }
+    });
+    const resetCommand = queuedAfterReset.body.items.find((item) => item.id === reset.body.id);
+    assert.ok(resetCommand);
+    const failedResult = await request(app.base, `/api/v1/agents/${agentEnroll.body.agentId}/commands/${resetCommand.id}/result`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${agentEnroll.body.token}` },
+      body: {
+        status: 'failed',
+        result: {
+          finishedAt: '2',
+          data: {
+            message: 'sing-box binary was not found; run sing-box-install or install sing-box manually'
+          }
+        }
+      }
+    });
+    assert.equal(failedResult.res.status, 200);
+    const failedEvents = await request(app.base, `/api/v1/commands/${resetCommand.id}/events?format=json`, { headers: auth });
+    assert.ok(failedEvents.body.items.some((event) => event.type === 'error' && event.message.includes('sing-box binary was not found')));
 
     const removed = await request(app.base, `/api/v1/nodes/${created.body.id}/protocols/${added.body.protocol.id}`, {
       method: 'DELETE',
