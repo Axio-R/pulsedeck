@@ -105,6 +105,22 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm build`: passed.
   - `git diff --check`: passed after cleaning generated router typing whitespace.
   - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine has no `cargo`; `rustc --version` is also unavailable, so Rust compilation must be validated by GitHub Actions/GHCR.
+- Committed and pushed `5ddcec5 Tighten node cards and sing-box state`, then tagged and pushed `v0.2.10`.
+- GitHub Actions and release:
+  - `main` panel image run `27091082303`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+  - Tag `v0.2.10`: panel image run `27091104628` completed successfully.
+  - Tag `v0.2.10`: Agent release run `27091104608` completed successfully and published release assets.
+  - Published Agent release assets: `pulsedeck-agent-v0.2.10-linux-x64.tar.gz` 436285 bytes, `pulsedeck-agent-v0.2.10-linux-arm64.tar.gz` 409485 bytes, `pulsedeck-agent-v0.2.10-linux-armv7l.tar.gz` 405187 bytes, and `SHA256SUMS` 326 bytes.
+- Deployment after `v0.2.10`:
+  - `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+  - `docker compose up -d`: recreated and started `pulsedeck-panel`.
+  - `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed with `version: 0.2.10` and `agentVersion: 0.2.10-rust`.
+  - `GET /api/v1/agents/runtime/manifest/linux-x64`: passed with `version: 0.2.10-rust`, `sizeBytes: 901696`, and SHA-256 `41a36886ce31c88f043b5c204ff3a12f186cc91df2d121d67d4c1f889ed01ac8`.
+- Post-deploy smoke passed:
+  - Login with `admin / change-me` succeeded.
+  - `GET /api/v1/nodes` returned the real `hk` node with latest Agent `0.2.10-rust`, current Agent `0.2.9-rust`, remote update support enabled, and sing-box binary path `/var/lib/pulsedeck/bin/sing-box`.
+  - Queued one `agent-update` command for `hk` so the node can pick up the new Agent when it resumes polling; command `f1854d3e-8505-440a-806e-d2978c1a0fae` was left in `queued` state because the node was not currently fresh-online.
 
 - Implementation direction for this turn:
   - Continue from target 4: improve subscription distribution without making the panel heavy.
