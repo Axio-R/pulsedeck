@@ -106,6 +106,20 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm build`: passed.
   - `cargo check --manifest-path apps/agent/Cargo.toml`: could not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
   - No local Docker image build was performed.
+- Committed and pushed `ba4e948 Add command event streaming and geo databases` to `origin/main`.
+- GitHub Actions run `27080894709` for commit `ba4e948`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+- `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+- `docker compose up -d`: recreated and started `pulsedeck-panel`.
+- `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+- `GET http://127.0.0.1:14770/api/v1/health`: passed with `name: PulseDeck` and `port: 14770`.
+- Post-deploy smoke passed against the Compose deployment:
+  - Login with `admin / change-me` succeeded.
+  - GeoIP and Geosite lookup endpoints returned the expected response shape; the deployed container has no local database mounted, so both reported `geoip-empty` / `geosite-empty`.
+  - Created and enrolled a temporary node.
+  - Queued a `probe` command, confirmed the Agent command snapshot included the node, posted an Agent progress event, and posted a successful command result.
+  - Verified command event history contained queued/running/progress/result events and the SSE endpoint returned an event stream.
+  - Verified Rust Agent runtime downloads from the deployed image: `linux-x64` 680400 bytes, `linux-arm64` 579512 bytes, and `linux-armv7l` 609484 bytes.
+  - Deleted the temporary smoke node after verification.
 
 - Implementation direction for this turn:
   - Continue optimizing from the worklog's pending items.
