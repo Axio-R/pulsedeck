@@ -97,6 +97,18 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `npm run check:api`: passed.
   - `npm test`: passed, 9 tests.
   - `git diff --check`: passed.
+- Committed and pushed `6bcff14 Fix agent installer binary replacement` to `origin/main`.
+- GitHub Actions run `27082537271` for commit `6bcff14`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+- Deployment after Agent installer hotfix:
+  - `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+  - `docker compose up -d`: recreated and started `pulsedeck-panel`.
+  - `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed with `name: PulseDeck` and `port: 14770`.
+- Post-deploy smoke passed against the Compose deployment:
+  - Created a temporary smoke node, fetched its generated Agent install script, and deleted the smoke node after verification.
+  - Confirmed the script includes `install_agent_binary`, `$AGENT_BIN.$$.download`, `mv -f "$next" "$target"`, `systemctl restart pulsedeck-agent.service`, and `rc-service pulsedeck-agent restart`.
+  - Confirmed the old direct runtime download into `$AGENT_BIN` is no longer present.
+  - Verified Rust Agent runtime download from the deployed image: `linux-x64` 762320 bytes.
 
 - Implementation direction for this turn:
   - Continue optimizing the Rust Agent local UX and node management panel after the traffic WebSocket deployment.
