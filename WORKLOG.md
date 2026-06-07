@@ -108,6 +108,24 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm build`: passed.
   - `git diff --check`: passed after cleaning the two known generated router-typing trailing spaces.
   - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+- Committed and pushed `d2dda9a Add live traffic charts and node controls`.
+- GitHub Actions and release:
+  - Main panel image run `27085965964`: completed successfully and published the fresh `latest` GHCR image.
+  - Tag `v0.2.4`: panel image run `27086110262` completed successfully.
+  - Tag `v0.2.4`: Agent release run `27086110264` completed successfully and published release assets.
+  - Published Agent release assets: `pulsedeck-agent-v0.2.4-linux-x64.tar.gz` 373153 bytes, `pulsedeck-agent-v0.2.4-linux-arm64.tar.gz` 349650 bytes, `pulsedeck-agent-v0.2.4-linux-armv7l.tar.gz` 344438 bytes, and `SHA256SUMS` 323 bytes.
+- Deployment after `v0.2.4`:
+  - `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+  - `docker compose up -d`: recreated and started `pulsedeck-panel`.
+  - `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed with `version: 0.2.4` and `agentVersion: 0.2.4-rust`.
+  - `GET /api/v1/agents/runtime/manifest/linux-x64`: passed with `version: 0.2.4-rust`, `sizeBytes: 770512`, and SHA-256 `505ecc8dfb0be72ffebf8508e56f81380653f8d05585d4b61c89883c02a2b383`.
+- Post-deploy smoke passed against the Compose deployment:
+  - Login with `admin / change-me` succeeded.
+  - Created a temporary smoke node, enrolled a temporary Agent, posted two metrics samples, and confirmed the deployed traffic WebSocket exposed positive RX/TX rates.
+  - Saved per-node traffic policy values and confirmed threshold, warning percent, and auto-disable state persisted.
+  - Added a VLESS protocol with custom listen address `127.0.0.1` and variant `reality`, and confirmed both fields persisted.
+  - Deleted the smoke node and confirmed no `smoke-v024-*` nodes remained.
 - Implementation direction for this turn:
   - Address real VPS feedback after `0.2.2`: the install path works, but `pk` without arguments did not open an interactive menu, CPU usage stayed blank, region text stayed at an ambiguous auto-detect state, and command push failures were not self-explanatory in the panel.
   - Prepare a suitable `v0.2.3` patch release after verification and deployment.
