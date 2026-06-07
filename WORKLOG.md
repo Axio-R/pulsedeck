@@ -105,6 +105,23 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm build`: passed.
   - `git diff --check`: passed.
   - `cargo check --manifest-path apps/agent/Cargo.toml`: could not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+- Committed and pushed:
+  - `dc40116 Add alert lifecycle and prepare v0.2.0`
+  - `0d303fa Clean up alert events for deleted nodes`
+- GitHub Actions:
+  - Run `27083425767` for commit `dc40116`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+  - Run `27083610809` for commit `0d303fa`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+- Deployment after alert loop and v0.2.0 work:
+  - `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+  - `docker compose up -d`: recreated and started `pulsedeck-panel`.
+  - `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed with `name: PulseDeck`, `version: 0.2.0`, and `port: 14770`.
+- Post-deploy smoke passed against the Compose deployment:
+  - Login with `admin / change-me` succeeded.
+  - Created and enrolled a temporary smoke node, posted metrics to trigger a traffic threshold, verified node subscription was disabled, verified a `traffic-threshold` alert action, acknowledged the alert, deleted the node, and confirmed related alert events were removed.
+  - Cleaned a stale alert event left by the earlier smoke before the cleanup fix.
+  - Restored the default alert policy after smoke verification.
+  - Verified Rust Agent runtime download from the deployed image: `linux-x64` 762320 bytes.
 
 - Hotfix direction for Agent installer:
   - A real node reinstall failed with `curl: (23) Failure writing output to destination` while downloading `/api/v1/agents/runtime/linux-x64` directly to `/var/lib/pulsedeck/bin/pulsedeck-agent`.
