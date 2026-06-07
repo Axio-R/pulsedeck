@@ -17,11 +17,12 @@ const DEFAULT_GEOIP_FILE = path.join(ROOT_DIR, 'geoip.json');
 const DEFAULT_GEOSITE_FILE = path.join(ROOT_DIR, 'geosite.json');
 const PORT = Number(process.env.PULSEDECK_PORT || 14770);
 const HOST = process.env.PULSEDECK_HOST || '0.0.0.0';
-const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.5';
+const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.6';
 const AGENT_VERSION = process.env.PULSEDECK_AGENT_VERSION || `${APP_VERSION}-rust`;
 const AGENT_RUNTIME_TARGETS = ['linux-x64', 'linux-arm64', 'linux-armv7l'];
 const ADMIN_USER = process.env.PULSEDECK_ADMIN_USER || 'admin';
 const ADMIN_PASSWORD = process.env.PULSEDECK_ADMIN_PASSWORD || 'change-me';
+const TRAFFIC_HISTORY_LIMIT = Math.max(Number(process.env.PULSEDECK_TRAFFIC_HISTORY_LIMIT) || 20_000, 1000);
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
@@ -247,6 +248,14 @@ function dashboard(data) {
   };
 }
 
+function orderedNodes(nodes = []) {
+  return nodes.slice().sort((a, b) => {
+    const order = (Number(a.order) || 0) - (Number(b.order) || 0);
+    if (order !== 0) return order;
+    return String(a.createdAt).localeCompare(String(b.createdAt));
+  });
+}
+
 function trafficSummary(nodes = []) {
   return nodes.reduce(
     (total, node) => {
@@ -266,6 +275,137 @@ function trafficSummary(nodes = []) {
       txRateBytesPerSecond: 0
     }
   );
+}
+
+function trafficModeValue(traffic = {}, mode = 'total') {
+  const normalized = trafficLimitMode(mode);
+  if (normalized === 'download') return Number(traffic.totalRxBytes) || 0;
+  if (normalized === 'upload') return Number(traffic.totalTxBytes) || 0;
+  return Number(traffic.totalBytes) || 0;
+}
+
+function addTrafficHistorySample(data, node, traffic, deltaRx, deltaTx, kind = 'sample') {
+  data.trafficHistory ||= [];
+  const rxBytes = Math.max(Number(deltaRx) || 0, 0);
+  const txBytes = Math.max(Number(deltaTx) || 0, 0);
+  data.trafficHistory.push({
+    id: randomUUID(),
+    nodeId: node.id,
+    rxBytes,
+    txBytes,
+    totalBytes: rxBytes + txBytes,
+    rxRateBytesPerSecond: Number(traffic.rxRateBytesPerSecond) || 0,
+    txRateBytesPerSecond: Number(traffic.txRateBytesPerSecond) || 0,
+    totalRxBytes: Number(traffic.totalRxBytes) || 0,
+    totalTxBytes: Number(traffic.totalTxBytes) || 0,
+    cumulativeBytes: Number(traffic.totalBytes) || 0,
+    kind,
+    createdAt: nowIso()
+  });
+  if (data.trafficHistory.length > TRAFFIC_HISTORY_LIMIT) {
+    data.trafficHistory = data.trafficHistory.slice(data.trafficHistory.length - TRAFFIC_HISTORY_LIMIT);
+  }
+}
+
+function resetNodeTraffic(data, node, kind = 'manual-reset') {
+  const traffic = node.traffic || {};
+  addTrafficHistorySample(data, node, traffic, 0, 0, kind);
+  node.traffic = {
+    ...traffic,
+    totalRxBytes: 0,
+    totalTxBytes: 0,
+    totalBytes: 0,
+    lastRxBytes: 0,
+    lastTxBytes: 0,
+    lastDeltaRxBytes: 0,
+    lastDeltaTxBytes: 0,
+    rxRateBytesPerSecond: 0,
+    txRateBytesPerSecond: 0,
+    thresholdExceededAt: null,
+    lastResetAt: nowIso(),
+    resetAnchorAt: traffic.resetAnchorAt || nowIso(),
+    updatedAt: nowIso()
+  };
+  node.alertState ||= {};
+  node.alertState.trafficThresholdAlertedAt = null;
+  node.alertState.trafficWarningAlertedAt = null;
+  if (node.status === 'warning') node.status = 'online';
+  node.updatedAt = nowIso();
+}
+
+function beijingDateKey(value = new Date()) {
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  })
+    .formatToParts(value instanceof Date ? value : new Date(value))
+    .reduce((result, part) => {
+      if (part.type !== 'literal') result[part.type] = part.value;
+      return result;
+    }, {});
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function beijingMonthKey(value = new Date()) {
+  return beijingDateKey(value).slice(0, 7);
+}
+
+function shouldResetTrafficCycle(traffic = {}) {
+  const mode = traffic.resetMode || 'none';
+  if (mode === 'none') return false;
+  const now = new Date();
+  if (!traffic.resetAnchorAt && !traffic.lastResetAt) {
+    traffic.resetAnchorAt = nowIso();
+    return false;
+  }
+  const lastResetAt = traffic.lastResetAt || traffic.resetAnchorAt;
+  if (!lastResetAt) return false;
+  if (mode === 'daily') return beijingDateKey(lastResetAt) !== beijingDateKey(now);
+  if (mode === 'weekly') return Date.now() - Date.parse(lastResetAt) >= 7 * 24 * 60 * 60 * 1000;
+  if (mode === 'interval') {
+    const days = Math.min(Math.max(Number(traffic.resetIntervalDays) || 30, 1), 365);
+    return Date.now() - Date.parse(lastResetAt) >= days * 24 * 60 * 60 * 1000;
+  }
+  if (mode === 'monthly') {
+    const day = Math.min(Math.max(Number(traffic.resetDay) || 1, 1), 31);
+    const currentDay = Number(beijingDateKey(now).slice(-2));
+    return currentDay >= day && beijingMonthKey(lastResetAt) !== beijingMonthKey(now);
+  }
+  return false;
+}
+
+function trafficHistoryItems(data, options = {}) {
+  const nodeId = String(options.nodeId || '').trim();
+  const limit = Math.min(Math.max(Number(options.limit) || 240, 1), 2000);
+  const since = options.since ? Date.parse(options.since) : 0;
+  return (data.trafficHistory || [])
+    .filter((item) => (!nodeId || item.nodeId === nodeId) && (!since || Date.parse(item.createdAt) >= since))
+    .slice()
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    .slice(0, limit);
+}
+
+function trafficRank(data, options = {}) {
+  const mode = trafficLimitMode(options.mode || 'total');
+  const limit = Math.min(Math.max(Number(options.limit) || 20, 1), 200);
+  return data.nodes
+    .map((node) => ({
+      nodeId: node.id,
+      name: node.name,
+      group: node.group || '',
+      region: displayRegion(node),
+      online: isNodeOnline(node, data),
+      totalRxBytes: Number(node.traffic?.totalRxBytes) || 0,
+      totalTxBytes: Number(node.traffic?.totalTxBytes) || 0,
+      totalBytes: Number(node.traffic?.totalBytes) || 0,
+      usageBytes: trafficModeValue(node.traffic, mode),
+      limitMode: mode,
+      updatedAt: node.traffic?.updatedAt || node.updatedAt
+    }))
+    .sort((a, b) => b.usageBytes - a.usageBytes)
+    .slice(0, limit);
 }
 
 function average(values) {
@@ -913,6 +1053,8 @@ function applyTrafficLimitAction(data, node, action) {
 function updateTrafficAccounting(data, node, metrics) {
   const current = metricsTraffic(metrics);
   if (!current.rx && !current.tx) return;
+  node.traffic ||= {};
+  if (shouldResetTrafficCycle(node.traffic)) resetNodeTraffic(data, node, 'cycle-reset');
   const traffic = node.traffic || {};
   const previousUpdatedAt = traffic.updatedAt ? Date.parse(traffic.updatedAt) : 0;
   const currentUpdatedAt = Date.now();
@@ -931,6 +1073,7 @@ function updateTrafficAccounting(data, node, metrics) {
   traffic.rxRateBytesPerSecond = elapsedSeconds ? Math.round(deltaRx / elapsedSeconds) : 0;
   traffic.txRateBytesPerSecond = elapsedSeconds ? Math.round(deltaTx / elapsedSeconds) : 0;
   traffic.updatedAt = nowIso();
+  addTrafficHistorySample(data, node, traffic, deltaRx, deltaTx, 'sample');
   const threshold = Number(traffic.thresholdBytes) || 0;
   traffic.limitMode = trafficLimitMode(traffic.limitMode);
   node.alertState ||= {};
@@ -1200,6 +1343,32 @@ function commandResultMessage(result) {
   return message || 'command failed';
 }
 
+function purgeNodes(draft, nodeIds) {
+  const removeIds = new Set(nodeIds);
+  const agentIds = new Set(draft.agents.filter((agent) => removeIds.has(agent.nodeId)).map((agent) => agent.id));
+  const beforeNodes = draft.nodes.length;
+  const beforeAgents = draft.agents.length;
+  const beforeCommands = draft.commands.length;
+  const beforeAlertEvents = (draft.alertEvents || []).length;
+  const beforeTrafficHistory = (draft.trafficHistory || []).length;
+  const removedCommandIds = new Set(
+    draft.commands.filter((command) => removeIds.has(command.nodeId) || agentIds.has(command.agentId)).map((command) => command.id)
+  );
+  draft.nodes = draft.nodes.filter((item) => !removeIds.has(item.id));
+  draft.agents = draft.agents.filter((agent) => !removeIds.has(agent.nodeId));
+  draft.commands = draft.commands.filter((command) => !removeIds.has(command.nodeId) && !agentIds.has(command.agentId));
+  draft.commandEvents = (draft.commandEvents || []).filter((event) => !removedCommandIds.has(event.commandId));
+  draft.alertEvents = (draft.alertEvents || []).filter((event) => !removeIds.has(event.nodeId));
+  draft.trafficHistory = (draft.trafficHistory || []).filter((item) => !removeIds.has(item.nodeId));
+  return {
+    removedNodes: beforeNodes - draft.nodes.length,
+    removedAgents: beforeAgents - draft.agents.length,
+    removedCommands: beforeCommands - draft.commands.length,
+    removedAlertEvents: beforeAlertEvents - draft.alertEvents.length,
+    removedTrafficHistory: beforeTrafficHistory - draft.trafficHistory.length
+  };
+}
+
 function sendSseEvent(res, type, data) {
   res.write(`event: ${type}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -1240,7 +1409,7 @@ function websocketAccept(key) {
 }
 
 function websocketFrame(payload) {
-  const body = Buffer.from(JSON.stringify(payload), 'utf8');
+  const body = Buffer.from(typeof payload === 'string' ? payload : JSON.stringify(payload), 'utf8');
   if (body.length < 126) return Buffer.concat([Buffer.from([0x81, body.length]), body]);
   if (body.length <= 0xffff) {
     const header = Buffer.alloc(4);
@@ -1256,9 +1425,75 @@ function websocketFrame(payload) {
   return Buffer.concat([header, body]);
 }
 
+function websocketControlFrame(opcode, body = Buffer.alloc(0)) {
+  const payload = Buffer.isBuffer(body) ? body : Buffer.from(String(body), 'utf8');
+  if (payload.length < 126) return Buffer.concat([Buffer.from([0x80 | opcode, payload.length]), payload]);
+  if (payload.length <= 0xffff) {
+    const header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(payload.length, 2);
+    return Buffer.concat([header, payload]);
+  }
+  const header = Buffer.alloc(10);
+  header[0] = 0x80 | opcode;
+  header[1] = 127;
+  header.writeBigUInt64BE(BigInt(payload.length), 2);
+  return Buffer.concat([header, payload]);
+}
+
 function writeWebSocket(socket, payload) {
   if (socket.destroyed || socket.writableEnded) return;
   socket.write(websocketFrame(payload));
+}
+
+function readWebSocketFrames(socket, chunk, onText) {
+  socket.pulseDeckBuffer = socket.pulseDeckBuffer ? Buffer.concat([socket.pulseDeckBuffer, chunk]) : Buffer.from(chunk);
+  let buffer = socket.pulseDeckBuffer;
+  while (buffer.length >= 2) {
+    const first = buffer[0];
+    const second = buffer[1];
+    const opcode = first & 0x0f;
+    const masked = (second & 0x80) !== 0;
+    let length = second & 0x7f;
+    let offset = 2;
+    if (length === 126) {
+      if (buffer.length < offset + 2) break;
+      length = buffer.readUInt16BE(offset);
+      offset += 2;
+    } else if (length === 127) {
+      if (buffer.length < offset + 8) break;
+      const bigLength = buffer.readBigUInt64BE(offset);
+      if (bigLength > BigInt(Number.MAX_SAFE_INTEGER)) {
+        socket.destroy();
+        return;
+      }
+      length = Number(bigLength);
+      offset += 8;
+    }
+    let mask;
+    if (masked) {
+      if (buffer.length < offset + 4) break;
+      mask = buffer.subarray(offset, offset + 4);
+      offset += 4;
+    }
+    if (buffer.length < offset + length) break;
+    const payload = Buffer.from(buffer.subarray(offset, offset + length));
+    buffer = buffer.subarray(offset + length);
+    if (mask) {
+      for (let index = 0; index < payload.length; index += 1) payload[index] ^= mask[index % 4];
+    }
+    if (opcode === 0x8) {
+      socket.end(websocketControlFrame(0x8));
+      return;
+    }
+    if (opcode === 0x9) {
+      socket.write(websocketControlFrame(0xa, payload));
+      continue;
+    }
+    if (opcode === 0x1) onText(payload.toString('utf8'));
+  }
+  socket.pulseDeckBuffer = buffer;
 }
 
 function closeUpgrade(socket, status = 401, detail = 'Unauthorized') {
@@ -1314,6 +1549,152 @@ function createTrafficHub(store) {
   };
 }
 
+function createAgentControlHub(store, realtime = {}) {
+  const sockets = new Map();
+
+  const markRunningAndSend = async (agentId, commandId) => {
+    const socket = sockets.get(agentId);
+    if (!socket || socket.destroyed || socket.writableEnded) return false;
+    let outgoing = null;
+    await store.update((draft) => {
+      const command = draft.commands.find((item) => item.id === commandId && item.status === 'queued');
+      const agent = draft.agents.find((item) => item.id === agentId);
+      const node = draft.nodes.find((item) => item.id === command?.nodeId && item.id === agent?.nodeId);
+      if (!command || !agent || !node) return;
+      command.status = 'running';
+      command.agentId = agentId;
+      command.updatedAt = nowIso();
+      appendCommandEvent(draft, command, {
+        type: 'state',
+        stream: 'state',
+        agentId,
+        message: `已通过控制通道推送 ${command.type}`,
+        payload: { status: 'running', type: command.type, transport: 'websocket' }
+      });
+      outgoing = presentAgentCommand(command, node);
+    });
+    if (!outgoing) return false;
+    writeWebSocket(socket, { type: 'command', command: outgoing, time: nowIso() });
+    return true;
+  };
+
+  const flushQueued = async (agentId) => {
+    const agent = store.data.agents.find((item) => item.id === agentId);
+    if (!agent) return;
+    const commandIds = store.data.commands
+      .filter((command) => command.nodeId === agent.nodeId && command.status === 'queued')
+      .map((command) => command.id);
+    for (const commandId of commandIds) await markRunningAndSend(agentId, commandId);
+  };
+
+  const handleMessage = async (agentId, text) => {
+    let message;
+    try {
+      message = JSON.parse(text);
+    } catch {
+      return;
+    }
+    const type = String(message.type || '').trim();
+    if (type === 'hello' || type === 'heartbeat') {
+      await store.update((draft) => {
+        const agent = draft.agents.find((item) => item.id === agentId);
+        const node = draft.nodes.find((item) => item.id === agent?.nodeId);
+        if (!agent || !node) return;
+        updateNodeFromAgent(draft, node, agent, {
+          version: message.version,
+          platform: message.platform,
+          arch: message.arch,
+          installDir: message.installDir,
+          serviceMode: message.serviceMode,
+          addresses: message.addresses
+        });
+      });
+      realtime.broadcastTraffic?.();
+      return;
+    }
+
+    if (type === 'command.event' || type === 'event') {
+      const commandId = String(message.commandId || '').trim();
+      if (!commandId) return;
+      await store.update((draft) => {
+        const command = draft.commands.find((item) => item.id === commandId && item.agentId === agentId);
+        if (!command) return;
+        appendCommandEvent(draft, command, {
+          agentId,
+          type: message.event?.type || message.stream || message.kind || 'progress',
+          stream: message.event?.stream || message.stream || message.kind || 'progress',
+          message: message.event?.message || message.message || '',
+          payload: message.event?.payload || message.payload || {},
+          sequence: message.event?.sequence || message.sequence
+        });
+        command.updatedAt = nowIso();
+      });
+      return;
+    }
+
+    if (type === 'command.result' || type === 'result') {
+      const commandId = String(message.commandId || '').trim();
+      if (!commandId) return;
+      await store.update((draft) => {
+        const command = draft.commands.find((item) => item.id === commandId && item.agentId === agentId);
+        if (!command) return;
+        command.status = message.status === 'failed' ? 'failed' : 'succeeded';
+        command.result = message.result || message;
+        applyCommandResultSideEffects(draft, command, command.result);
+        appendCommandEvent(draft, command, {
+          type: command.status === 'failed' ? 'error' : 'result',
+          stream: command.status === 'failed' ? 'stderr' : 'result',
+          agentId,
+          message: command.status === 'failed' ? commandResultMessage(command.result) : '命令执行成功',
+          payload: { status: command.status, result: command.result, transport: 'websocket' }
+        });
+        appendCommandEvent(draft, command, {
+          type: 'state',
+          stream: 'state',
+          agentId,
+          message: command.status,
+          payload: { status: command.status, transport: 'websocket' }
+        });
+        command.updatedAt = nowIso();
+      });
+      realtime.broadcastTraffic?.();
+    }
+  };
+
+  return {
+    add(agent, socket) {
+      sockets.set(agent.id, socket);
+      writeWebSocket(socket, { type: 'hello', transport: 'websocket', time: nowIso() });
+      flushQueued(agent.id);
+      socket.on('data', (chunk) => {
+        readWebSocketFrames(socket, chunk, (text) => {
+          void handleMessage(agent.id, text);
+        });
+      });
+      socket.on('close', () => {
+        if (sockets.get(agent.id) === socket) sockets.delete(agent.id);
+      });
+      socket.on('error', () => {
+        if (sockets.get(agent.id) === socket) sockets.delete(agent.id);
+      });
+    },
+    async dispatchCommand(commandId) {
+      const command = store.data.commands.find((item) => item.id === commandId && item.status === 'queued');
+      if (!command) return false;
+      const agent = store.data.agents.find((item) => item.nodeId === command.nodeId && sockets.has(item.id));
+      if (!agent) return false;
+      return markRunningAndSend(agent.id, command.id);
+    },
+    onlineAgentIds() {
+      return [...sockets.keys()];
+    },
+    close() {
+      for (const socket of sockets.values()) socket.destroy();
+      sockets.clear();
+    }
+  };
+}
+
 function handleTrafficUpgrade(req, socket, store, trafficHub) {
   const url = new URL(req.url || '/', `http://${req.headers.host || `127.0.0.1:${PORT}`}`);
   if (url.pathname !== '/api/v1/traffic/stream') return closeUpgrade(socket, 404, 'Not Found');
@@ -1330,6 +1711,36 @@ function handleTrafficUpgrade(req, socket, store, trafficHub) {
     ].join('\r\n')
   );
   trafficHub.add(socket);
+}
+
+function handleAgentControlUpgrade(req, socket, store, agentControlHub) {
+  const url = new URL(req.url || '/', `http://${req.headers.host || `127.0.0.1:${PORT}`}`);
+  const segments = url.pathname.split('/').filter(Boolean);
+  if (!(segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'agents' && segments[3] && segments[4] === 'control' && segments[5] === 'stream')) {
+    return closeUpgrade(socket, 404, 'Not Found');
+  }
+  const agentId = segments[3];
+  const agent = requireAgent(req, store.data, agentId, url);
+  if (!agent) return closeUpgrade(socket, 403, 'Forbidden');
+  const key = String(req.headers['sec-websocket-key'] || '');
+  if (!key || String(req.headers.upgrade || '').toLowerCase() !== 'websocket') return closeUpgrade(socket, 400, 'Bad Request');
+  socket.write(
+    [
+      'HTTP/1.1 101 Switching Protocols',
+      'Upgrade: websocket',
+      'Connection: Upgrade',
+      `Sec-WebSocket-Accept: ${websocketAccept(key)}`,
+      '\r\n'
+    ].join('\r\n')
+  );
+  agentControlHub.add(agent, socket);
+}
+
+function handleWebSocketUpgrade(req, socket, store, trafficHub, agentControlHub) {
+  const url = new URL(req.url || '/', `http://${req.headers.host || `127.0.0.1:${PORT}`}`);
+  if (url.pathname === '/api/v1/traffic/stream') return handleTrafficUpgrade(req, socket, store, trafficHub);
+  if (/^\/api\/v1\/agents\/[^/]+\/control\/stream$/.test(url.pathname)) return handleAgentControlUpgrade(req, socket, store, agentControlHub);
+  return closeUpgrade(socket, 404, 'Not Found');
 }
 
 async function serveStatic(req, res, pathname) {
@@ -1513,7 +1924,8 @@ async function handleApi(req, res, store, url, realtime = {}) {
           heartbeat: `/api/v1/agents/${agent.id}/heartbeat`,
           metrics: `/api/v1/agents/${agent.id}/metrics`,
           diagnostics: `/api/v1/agents/${agent.id}/diagnostics`,
-          commands: `/api/v1/agents/${agent.id}/commands`
+          commands: `/api/v1/agents/${agent.id}/commands`,
+          controlStream: `/api/v1/agents/${agent.id}/control/stream`
         }
       };
     });
@@ -1685,7 +2097,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
 
   if (method === 'GET' && url.pathname === '/api/v1/nodes') {
     return sendJson(res, 200, {
-      items: data.nodes.map((node) => presentNode(node, req, data))
+      items: orderedNodes(data.nodes).map((node) => presentNode(node, req, data))
     });
   }
 
@@ -1694,10 +2106,88 @@ async function handleApi(req, res, store, url, realtime = {}) {
     let node;
     await store.update((draft) => {
       node = createNode(body);
+      node.order = Math.max(0, ...draft.nodes.map((item) => Number(item.order) || 0)) + 1;
       draft.nodes.push(node);
     });
     realtime.broadcastTraffic?.();
     return sendJson(res, 201, presentNode(node, req, store.data));
+  }
+
+  if (method === 'POST' && url.pathname === '/api/v1/nodes/reorder') {
+    const body = await readJson(req);
+    const ids = Array.isArray(body.ids) ? body.ids.map((id) => String(id)).filter(Boolean) : [];
+    if (!ids.length) return badRequest(res, 'ids is required');
+    await store.update((draft) => {
+      const order = new Map(ids.map((id, index) => [id, index + 1]));
+      for (const node of draft.nodes) {
+        if (order.has(node.id)) node.order = order.get(node.id);
+      }
+    });
+    return sendJson(res, 200, { updated: true, items: orderedNodes(store.data.nodes).map((node) => presentNode(node, req, store.data)) });
+  }
+
+  if (method === 'POST' && url.pathname === '/api/v1/nodes/batch-command') {
+    const body = await readJson(req);
+    const nodeIds = Array.isArray(body.nodeIds) ? [...new Set(body.nodeIds.map((id) => String(id)).filter(Boolean))] : [];
+    const type = String(body.type || 'probe').trim() || 'probe';
+    const payload = body.payload && typeof body.payload === 'object' && !Array.isArray(body.payload) ? body.payload : {};
+    if (!nodeIds.length) return badRequest(res, 'nodeIds is required');
+    const commands = [];
+    await store.update((draft) => {
+      for (const nodeId of nodeIds) {
+        if (!draft.nodes.some((node) => node.id === nodeId)) continue;
+        commands.push(createCommand(draft, nodeId, type, payload));
+      }
+    });
+    for (const command of commands) await realtime.dispatchCommand?.(command.id);
+    return sendJson(res, 201, { queued: commands.length, items: commands });
+  }
+
+  if (method === 'POST' && url.pathname === '/api/v1/nodes/batch-delete') {
+    const body = await readJson(req);
+    const nodeIds = Array.isArray(body.nodeIds) ? [...new Set(body.nodeIds.map((id) => String(id)).filter(Boolean))] : [];
+    if (!nodeIds.length) return badRequest(res, 'nodeIds is required');
+    let summary;
+    await store.update((draft) => {
+      summary = purgeNodes(draft, nodeIds);
+    });
+    realtime.broadcastTraffic?.();
+    return sendJson(res, 200, { deleted: true, ...summary });
+  }
+
+  if (method === 'GET' && url.pathname === '/api/v1/traffic/history') {
+    return sendJson(res, 200, {
+      items: trafficHistoryItems(data, {
+        nodeId: url.searchParams.get('nodeId'),
+        since: url.searchParams.get('since'),
+        limit: url.searchParams.get('limit')
+      })
+    });
+  }
+
+  if (method === 'GET' && url.pathname === '/api/v1/traffic/rank') {
+    return sendJson(res, 200, {
+      mode: trafficLimitMode(url.searchParams.get('mode') || 'total'),
+      items: trafficRank(data, {
+        mode: url.searchParams.get('mode'),
+        limit: url.searchParams.get('limit')
+      })
+    });
+  }
+
+  if (method === 'POST' && url.pathname === '/api/v1/traffic/reset') {
+    const body = await readJson(req);
+    const nodeIds = Array.isArray(body.nodeIds) ? [...new Set(body.nodeIds.map((id) => String(id)).filter(Boolean))] : [];
+    let reset = 0;
+    await store.update((draft) => {
+      for (const node of draft.nodes) {
+        if (nodeIds.length && !nodeIds.includes(node.id)) continue;
+        resetNodeTraffic(draft, node, 'manual-reset');
+        reset += 1;
+      }
+    });
+    realtime.broadcastTraffic?.();
+    return sendJson(res, 200, { reset });
   }
 
   if ((method === 'PUT' || method === 'PATCH') && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'nodes' && segments[3] && !segments[4]) {
@@ -1713,6 +2203,8 @@ async function handleApi(req, res, store, url, realtime = {}) {
         node.regionOverride = Boolean(node.region);
         node.network = { ...(node.network || {}), regionSource: node.region ? 'manual' : 'auto-pending' };
       }
+      if (body.group !== undefined) node.group = String(body.group).trim();
+      if (body.order !== undefined && Number.isFinite(Number(body.order))) node.order = Number(body.order);
       if (Array.isArray(body.tags)) node.tags = body.tags.map((tag) => String(tag).trim()).filter(Boolean);
       if (body.subscriptionEnabled !== undefined) node.subscriptionEnabled = body.subscriptionEnabled === true;
       if (body.traffic && typeof body.traffic === 'object') {
@@ -1721,7 +2213,15 @@ async function handleApi(req, res, store, url, realtime = {}) {
           ...(body.traffic.thresholdBytes !== undefined ? { thresholdBytes: Number(body.traffic.thresholdBytes) || 0 } : {}),
           ...(body.traffic.limitMode !== undefined ? { limitMode: trafficLimitMode(body.traffic.limitMode) } : {}),
           ...(body.traffic.warningPercent !== undefined ? { warningPercent: Number(body.traffic.warningPercent) || 80 } : {}),
-          ...(body.traffic.autoDisableSubscription !== undefined ? { autoDisableSubscription: body.traffic.autoDisableSubscription === true } : {})
+          ...(body.traffic.autoDisableSubscription !== undefined ? { autoDisableSubscription: body.traffic.autoDisableSubscription === true } : {}),
+          ...(body.traffic.resetMode !== undefined && ['none', 'daily', 'weekly', 'monthly', 'interval'].includes(body.traffic.resetMode)
+            ? { resetMode: body.traffic.resetMode }
+            : {}),
+          ...(body.traffic.resetDay !== undefined ? { resetDay: Math.min(Math.max(Number(body.traffic.resetDay) || 1, 1), 31) } : {}),
+          ...(body.traffic.resetIntervalDays !== undefined
+            ? { resetIntervalDays: Math.min(Math.max(Number(body.traffic.resetIntervalDays) || 30, 1), 365) }
+            : {}),
+          ...(body.traffic.resetAnchorAt !== undefined ? { resetAnchorAt: body.traffic.resetAnchorAt || null } : {})
         };
       }
       if (body.alertPolicy && typeof body.alertPolicy === 'object') {
@@ -1738,26 +2238,12 @@ async function handleApi(req, res, store, url, realtime = {}) {
     const nodeId = segments[3];
     const node = data.nodes.find((item) => item.id === nodeId);
     if (!node) return notFound(res);
-    let removedAgents = 0;
-    let removedCommands = 0;
-    let removedAlertEvents = 0;
+    let summary;
     await store.update((draft) => {
-      const agentIds = new Set(draft.agents.filter((agent) => agent.nodeId === nodeId).map((agent) => agent.id));
-      const beforeAgents = draft.agents.length;
-      const beforeCommands = draft.commands.length;
-      const beforeAlertEvents = (draft.alertEvents || []).length;
-      const removedCommandIds = new Set(draft.commands.filter((command) => command.nodeId === nodeId || agentIds.has(command.agentId)).map((command) => command.id));
-      draft.nodes = draft.nodes.filter((item) => item.id !== nodeId);
-      draft.agents = draft.agents.filter((agent) => agent.nodeId !== nodeId);
-      draft.commands = draft.commands.filter((command) => command.nodeId !== nodeId && !agentIds.has(command.agentId));
-      draft.commandEvents = (draft.commandEvents || []).filter((event) => !removedCommandIds.has(event.commandId));
-      draft.alertEvents = (draft.alertEvents || []).filter((event) => event.nodeId !== nodeId);
-      removedAgents = beforeAgents - draft.agents.length;
-      removedCommands = beforeCommands - draft.commands.length;
-      removedAlertEvents = beforeAlertEvents - draft.alertEvents.length;
+      summary = purgeNodes(draft, [nodeId]);
     });
     realtime.broadcastTraffic?.();
-    return sendJson(res, 200, { deleted: true, removedAgents, removedCommands, removedAlertEvents });
+    return sendJson(res, 200, { deleted: true, ...summary });
   }
 
   if (method === 'POST' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'nodes' && segments[3] && segments[4] === 'links' && segments[5] === 'reset') {
@@ -1773,6 +2259,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
     });
     if (!command) return notFound(res);
     realtime.broadcastTraffic?.();
+    await realtime.dispatchCommand?.(command.id);
     return sendJson(res, 201, command);
   }
 
@@ -1792,6 +2279,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
     });
     if (!protocol) return notFound(res);
     realtime.broadcastTraffic?.();
+    await realtime.dispatchCommand?.(command.id);
     return sendJson(res, 201, { protocol, command });
   }
 
@@ -1811,6 +2299,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
     });
     if (!protocol) return notFound(res);
     realtime.broadcastTraffic?.();
+    await realtime.dispatchCommand?.(command.id);
     return sendJson(res, 200, { deleted: true, protocol, command });
   }
 
@@ -1824,6 +2313,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
       command = createCommand(draft, nodeId, body.type || 'probe', body.payload || {});
     });
     if (!command) return notFound(res);
+    await realtime.dispatchCommand?.(command.id);
     return sendJson(res, 201, command);
   }
 
@@ -2006,6 +2496,7 @@ export async function createPulseDeckServer(options = {}) {
   const store = options.store || new JsonStore(options.dataFile);
   await store.load();
   const trafficHub = createTrafficHub(store);
+  const agentControlHub = createAgentControlHub(store, { broadcastTraffic: () => trafficHub.broadcast() });
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -2020,7 +2511,10 @@ export async function createPulseDeckServer(options = {}) {
 
       const url = new URL(req.url || '/', `http://${req.headers.host || `127.0.0.1:${PORT}`}`);
       if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/sub/')) {
-        await handleApi(req, res, store, url, { broadcastTraffic: () => trafficHub.broadcast() });
+        await handleApi(req, res, store, url, {
+          broadcastTraffic: () => trafficHub.broadcast(),
+          dispatchCommand: (commandId) => agentControlHub.dispatchCommand(commandId)
+        });
         return;
       }
       await serveStatic(req, res, url.pathname);
@@ -2029,8 +2523,11 @@ export async function createPulseDeckServer(options = {}) {
       sendJson(res, 500, { detail: error.message || 'internal server error' });
     }
   });
-  server.on('upgrade', (req, socket) => handleTrafficUpgrade(req, socket, store, trafficHub));
-  server.on('close', () => trafficHub.close());
+  server.on('upgrade', (req, socket) => handleWebSocketUpgrade(req, socket, store, trafficHub, agentControlHub));
+  server.on('close', () => {
+    trafficHub.close();
+    agentControlHub.close();
+  });
   return server;
 }
 

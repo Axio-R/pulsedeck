@@ -1,6 +1,7 @@
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
+use std::net::TcpStream;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -8,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const VERSION: &str = "0.2.5-rust";
+const VERSION: &str = "0.2.6-rust";
 
 #[derive(Clone, Debug)]
 struct Config {
@@ -150,12 +151,135 @@ fn run() -> Result<(), String> {
 fn run_daemon() -> Result<(), String> {
     let config = load_config()?;
     log_line(&config, &format!("PulseDeck Rust Agent {VERSION} 启动"));
+    let mut control_started = false;
     loop {
-        if let Err(error) = run_once(&config) {
-            log_line(&config, &format!("探测周期失败：{error}"));
+        match run_once(&config) {
+            Ok(state) => {
+                if !control_started && !state.agent_id.is_empty() && !state.token.is_empty() {
+                    let control_config = config.clone();
+                    thread::spawn(move || control_loop(control_config));
+                    control_started = true;
+                }
+            }
+            Err(error) => {
+                log_line(&config, &format!("探测周期失败：{error}"));
+            }
         }
         thread::sleep(Duration::from_millis(config.interval_ms.max(5_000)));
     }
+}
+
+fn control_loop(config: Config) {
+    loop {
+        if let Err(error) = control_stream_once(&config) {
+            log_line(&config, &format!("控制通道断开：{error}"));
+        }
+        thread::sleep(Duration::from_secs(5));
+    }
+}
+
+fn control_stream_once(config: &Config) -> Result<(), String> {
+    let state = load_state(&config.state_file);
+    if state.agent_id.is_empty() || state.token.is_empty() {
+        return Err("Agent 尚未完成注册".to_string());
+    }
+    let endpoint = format!(
+        "/api/v1/agents/{}/control/stream?token={}",
+        url_component(&state.agent_id),
+        url_component(&state.token)
+    );
+    let (host, port, path) = parse_http_ws_target(config, &endpoint)?;
+    let mut stream = TcpStream::connect((host.as_str(), port)).map_err(|error| format!("无法连接控制通道：{error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(|error| format!("无法设置控制通道读取超时：{error}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|error| format!("无法设置控制通道写入超时：{error}"))?;
+    let key = websocket_key();
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer {}\r\n\r\n",
+        state.token
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("控制通道握手发送失败：{error}"))?;
+    let response = read_http_upgrade_response(&mut stream)?;
+    if !response.starts_with("HTTP/1.1 101") && !response.starts_with("HTTP/1.0 101") {
+        return Err("控制通道握手被面板拒绝".to_string());
+    }
+    log_line(config, "控制通道已连接");
+    ws_send_json(
+        &mut stream,
+        &format!(
+            "{{\"type\":\"hello\",\"version\":\"{}\",\"platform\":\"{}\",\"arch\":\"{}\",\"installDir\":\"{}\",\"serviceMode\":\"{}\",\"addresses\":{}}}",
+            json_escape(VERSION),
+            json_escape(os_name()),
+            json_escape(arch_name()),
+            json_escape(&config.agent_home),
+            json_escape(&config.service_mode),
+            collect_addresses_json()
+        ),
+    )?;
+
+    loop {
+        match ws_read_text(&mut stream)? {
+            Some(text) => {
+                if let Some(agent_command) = parse_control_command(&text) {
+                    run_control_command(config, &state, &mut stream, &agent_command)?;
+                }
+            }
+            None => {
+                ws_send_json(
+                    &mut stream,
+                    &format!(
+                        "{{\"type\":\"heartbeat\",\"version\":\"{}\",\"platform\":\"{}\",\"arch\":\"{}\",\"serviceMode\":\"{}\"}}",
+                        json_escape(VERSION),
+                        json_escape(os_name()),
+                        json_escape(arch_name()),
+                        json_escape(&config.service_mode)
+                    ),
+                )?;
+            }
+        }
+    }
+}
+
+fn run_control_command(config: &Config, state: &State, stream: &mut TcpStream, agent_command: &AgentCommand) -> Result<(), String> {
+    ws_send_json(
+        stream,
+        &format!(
+            "{{\"type\":\"command.event\",\"commandId\":\"{}\",\"stream\":\"state\",\"message\":\"{}\",\"payload\":{{\"status\":\"running\",\"transport\":\"websocket\"}}}}",
+            json_escape(&agent_command.id),
+            json_escape(&format!("开始执行 {}", agent_command.kind))
+        ),
+    )?;
+    let (status, result) = execute_agent_command(config, state, agent_command);
+    let event_message = if status == "failed" {
+        result_message(&result).unwrap_or_else(|| "命令执行失败".to_string())
+    } else {
+        "命令已完成，正在通过控制通道上报结果".to_string()
+    };
+    ws_send_json(
+        stream,
+        &format!(
+            "{{\"type\":\"command.event\",\"commandId\":\"{}\",\"stream\":\"{}\",\"message\":\"{}\",\"payload\":{{\"status\":\"{}\",\"transport\":\"websocket\"}}}}",
+            json_escape(&agent_command.id),
+            if status == "failed" { "stderr" } else { "stdout" },
+            json_escape(&event_message),
+            json_escape(&status)
+        ),
+    )?;
+    ws_send_json(
+        stream,
+        &format!(
+            "{{\"type\":\"command.result\",\"commandId\":\"{}\",\"status\":\"{}\",\"result\":{{\"finishedAt\":\"{}\",\"data\":{}}}}}",
+            json_escape(&agent_command.id),
+            json_escape(&status),
+            json_escape(&now_string()),
+            result
+        ),
+    )
 }
 
 fn run_once(config: &Config) -> Result<State, String> {
@@ -1223,6 +1347,141 @@ fn post_command_event(config: &Config, state: &State, agent_command: &AgentComma
     )
 }
 
+fn parse_http_ws_target(config: &Config, endpoint: &str) -> Result<(String, u16, String), String> {
+    let base = config.base_url.trim_end_matches('/');
+    let rest = base
+        .strip_prefix("http://")
+        .ok_or_else(|| "当前轻量控制通道仅支持 http 面板地址，已保留 HTTP 轮询兜底".to_string())?;
+    let (authority, base_path) = rest.split_once('/').unwrap_or((rest, ""));
+    let (host, port) = if authority.starts_with('[') {
+        let end = authority.find(']').ok_or_else(|| "无效 IPv6 面板地址".to_string())?;
+        let host = authority[1..end].to_string();
+        let port = authority[end + 1..]
+            .strip_prefix(':')
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(80);
+        (host, port)
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        (host.to_string(), port.parse::<u16>().unwrap_or(80))
+    } else {
+        (authority.to_string(), 80)
+    };
+    if host.trim().is_empty() {
+        return Err("面板地址缺少主机名".to_string());
+    }
+    let prefix = if base_path.trim().is_empty() {
+        String::new()
+    } else {
+        format!("/{}", base_path.trim_matches('/'))
+    };
+    Ok((host, port, format!("{prefix}{endpoint}")))
+}
+
+fn websocket_key() -> String {
+    let seed = format!("pulsedeck-agent:{}:{}", std::process::id(), unix_seconds());
+    let mut bytes = [0u8; 16];
+    for (index, byte) in seed.bytes().enumerate() {
+        bytes[index % 16] ^= byte.rotate_left((index % 8) as u32);
+    }
+    base64_encode(&bytes)
+}
+
+fn read_http_upgrade_response(stream: &mut TcpStream) -> Result<String, String> {
+    let mut buffer = Vec::new();
+    let mut byte = [0u8; 1];
+    while buffer.len() < 8192 {
+        stream
+            .read_exact(&mut byte)
+            .map_err(|error| format!("读取控制通道握手失败：{error}"))?;
+        buffer.push(byte[0]);
+        if buffer.ends_with(b"\r\n\r\n") {
+            return String::from_utf8(buffer).map_err(|error| format!("控制通道握手不是 UTF-8：{error}"));
+        }
+    }
+    Err("控制通道握手响应过大".to_string())
+}
+
+fn ws_send_json(stream: &mut TcpStream, body: &str) -> Result<(), String> {
+    let payload = body.as_bytes();
+    let mut frame = Vec::new();
+    frame.push(0x81);
+    if payload.len() < 126 {
+        frame.push(0x80 | payload.len() as u8);
+    } else if payload.len() <= 0xffff {
+        frame.push(0x80 | 126);
+        frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    } else {
+        frame.push(0x80 | 127);
+        frame.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    }
+    let mask = [
+        (unix_seconds() & 0xff) as u8,
+        ((std::process::id() as u64 >> 8) & 0xff) as u8,
+        0x42,
+        0x24,
+    ];
+    frame.extend_from_slice(&mask);
+    for (index, byte) in payload.iter().enumerate() {
+        frame.push(*byte ^ mask[index % 4]);
+    }
+    stream.write_all(&frame).map_err(|error| format!("控制通道写入失败：{error}"))
+}
+
+fn ws_read_text(stream: &mut TcpStream) -> Result<Option<String>, String> {
+    let mut header = [0u8; 2];
+    if let Err(error) = stream.read_exact(&mut header) {
+        if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) {
+            return Ok(None);
+        }
+        return Err(format!("控制通道读取失败：{error}"));
+    }
+    let opcode = header[0] & 0x0f;
+    let masked = (header[1] & 0x80) != 0;
+    let mut length = (header[1] & 0x7f) as u64;
+    if length == 126 {
+        let mut extended = [0u8; 2];
+        stream
+            .read_exact(&mut extended)
+            .map_err(|error| format!("控制通道读取扩展长度失败：{error}"))?;
+        length = u16::from_be_bytes(extended) as u64;
+    } else if length == 127 {
+        let mut extended = [0u8; 8];
+        stream
+            .read_exact(&mut extended)
+            .map_err(|error| format!("控制通道读取扩展长度失败：{error}"))?;
+        length = u64::from_be_bytes(extended);
+    }
+    if length > 4 * 1024 * 1024 {
+        return Err("控制通道帧过大".to_string());
+    }
+    let mut mask = [0u8; 4];
+    if masked {
+        stream
+            .read_exact(&mut mask)
+            .map_err(|error| format!("控制通道读取掩码失败：{error}"))?;
+    }
+    let mut payload = vec![0u8; length as usize];
+    stream
+        .read_exact(&mut payload)
+        .map_err(|error| format!("控制通道读取负载失败：{error}"))?;
+    if masked {
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte ^= mask[index % 4];
+        }
+    }
+    match opcode {
+        0x1 => String::from_utf8(payload)
+            .map(Some)
+            .map_err(|error| format!("控制通道文本不是 UTF-8：{error}")),
+        0x8 => Err("控制通道被面板关闭".to_string()),
+        0x9 => {
+            ws_send_json(stream, "{\"type\":\"pong\"}")?;
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
 fn download_to(url: &str, target: &str) -> Result<(), String> {
     let status = Command::new("curl")
         .args(["-fsSL", url, "-o", target])
@@ -2003,19 +2262,29 @@ fn first_address(node_json: &str) -> Option<String> {
 fn parse_command_items(raw: &str) -> Vec<AgentCommand> {
     json_array_field_objects(raw, "items")
         .into_iter()
-        .filter_map(|object| {
-            let id = json_get_string(&object, "id").unwrap_or_default();
-            if id.is_empty() {
-                return None;
-            }
-            Some(AgentCommand {
-                id,
-                kind: json_get_string(&object, "type").unwrap_or_else(|| "probe".to_string()),
-                payload_json: json_get_value(&object, "payload").unwrap_or_else(|| "{}".to_string()),
-                node_json: json_get_value(&object, "node").unwrap_or_else(|| "{}".to_string()),
-            })
-        })
+        .filter_map(|object| parse_command_object(&object))
         .collect()
+}
+
+fn parse_control_command(raw: &str) -> Option<AgentCommand> {
+    if json_get_string(raw, "type").unwrap_or_default() != "command" {
+        return None;
+    }
+    let object = json_get_value(raw, "command")?;
+    parse_command_object(&object)
+}
+
+fn parse_command_object(object: &str) -> Option<AgentCommand> {
+    let id = json_get_string(object, "id").unwrap_or_default();
+    if id.is_empty() {
+        return None;
+    }
+    Some(AgentCommand {
+        id,
+        kind: json_get_string(object, "type").unwrap_or_else(|| "probe".to_string()),
+        payload_json: json_get_value(object, "payload").unwrap_or_else(|| "{}".to_string()),
+        node_json: json_get_value(object, "node").unwrap_or_else(|| "{}".to_string()),
+    })
 }
 
 fn json_array_field_objects(raw: &str, key: &str) -> Vec<String> {

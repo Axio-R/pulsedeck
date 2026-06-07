@@ -86,6 +86,40 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 ### 2026-06-07
 
 - Implementation direction for this turn:
+  - Complete priority modules 1/2/3 before moving to later optional modules.
+  - Add persistent lightweight traffic history, traffic rank, manual reset, and cycle reset policy fields.
+  - Add a bidirectional Agent control channel while preserving HTTP command polling as compatibility fallback.
+  - Improve node management with grouping, ordering, batch commands, batch deletion, and IP copy affordances.
+  - Prepare the project metadata for `v0.2.6`.
+- Implementation completed before commit:
+  - Added rolling traffic history persistence, `/api/v1/traffic/history`, `/api/v1/traffic/rank`, and `/api/v1/traffic/reset`.
+  - Added traffic reset policy fields for none/daily/weekly/monthly/interval modes and automatic reset evaluation during metrics accounting.
+  - Added Agent control WebSocket upgrade handling, server-side command dispatch to connected Agents, and WebSocket event/result ingestion.
+  - Added a lightweight Rust Agent control-thread client for `http://` panel control streams, with existing HTTP polling retained as fallback.
+  - Added node `group` and `order`, node reorder API, batch command API, batch delete API, and cleanup of related traffic history on deletion.
+  - Updated the Nodes page with group filtering, selection toolbar, batch operations, traffic rank/history panels, traffic reset controls, node order buttons, and IP copy controls.
+  - Bumped panel and Agent metadata to `0.2.6` / `0.2.6-rust`.
+- Local verification before commit:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 14 tests including traffic history/rank/reset, batch node management, and Agent control WebSocket.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `git diff --check`: passed after cleaning generated router typing whitespace.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+
+- Implementation direction for this turn:
+  - Review an external node-control reference implementation at feature level and compare it with PulseDeck without importing its naming into project files.
+  - Let the operator choose which larger modules should be ported next, while applying low-risk improvements to existing same-purpose node cards immediately.
+  - Add compact WARP/IPv4/IPv6 address visibility to node cards using existing Agent-reported network/address data.
+- Implementation completed before commit:
+  - Added node card IP rows for WARP, IPv4, and IPv6 with compact responsive styling, long-address ellipsis, and full address hover text.
+  - Changed the redundant card metric label from `IP` to `模式` because the card now shows actual addresses separately.
+- Local verification before commit:
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `git diff --check`: passed after cleaning generated router typing whitespace.
+
+- Implementation direction for this turn:
   - Remove default-port suffixes from protocol selection labels and keep per-node port customization explicit.
   - Standardize visible panel time formatting to Beijing time as `YYYY.MM.DD HH:mm:ss`.
   - Improve Agent and panel node-region auto detection by allowing the Agent to report a cached public IP region fallback when local GeoIP is unavailable.

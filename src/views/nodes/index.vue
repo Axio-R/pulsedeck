@@ -1,21 +1,29 @@
 <script setup lang="ts">
 import { computed, h, onMounted, onUnmounted, reactive, ref } from 'vue';
-import { NButton, NPopconfirm, NTag } from 'naive-ui';
+import { NButton, NPopconfirm, NTag, type DataTableColumns } from 'naive-ui';
 import {
+  batchDeletePulseNodes,
+  batchPulseNodeCommand,
   createPulseNode,
   createPulseNodeProtocol,
   deletePulseNode,
   deletePulseNodeProtocol,
   fetchPulseNodes,
   fetchPulseProtocols,
+  fetchPulseTrafficHistory,
+  fetchPulseTrafficRank,
   openPulseTrafficSocket,
   queuePulseCommand,
+  reorderPulseNodes,
+  resetPulseTraffic,
   resetPulseNodeLinks,
   updatePulseNode,
   type PulseNode,
   type PulseProtocolMeta,
   type PulseTrafficEvent,
-  type PulseTrafficNode
+  type PulseTrafficHistoryItem,
+  type PulseTrafficNode,
+  type PulseTrafficRankItem
 } from '@/service/api';
 import { formatBeijingTime, formatBytes, formatRate } from '@/utils/pulse-format';
 
@@ -26,7 +34,11 @@ type TrafficDraft = {
   warningPercent: number;
   autoDisableSubscription: boolean;
   subscriptionEnabled: boolean;
+  resetMode: 'none' | 'daily' | 'weekly' | 'monthly' | 'interval';
+  resetDay: number;
+  resetIntervalDays: number;
 };
+type NodeIpRow = { label: string; value: string; tone: 'warp' | 'ipv4' | 'ipv6' | 'muted' };
 type TrafficSample = { time: number; rx: number; tx: number };
 type TrafficSocketState = 'connecting' | 'live' | 'reconnecting' | 'offline';
 
@@ -34,10 +46,16 @@ const trafficHistoryLimit = 60;
 const loading = ref(false);
 const nodes = ref<PulseNode[]>([]);
 const protocolMetas = ref<PulseProtocolMeta[]>([]);
-const form = reactive({ name: '', region: '', tags: '' });
+const form = reactive({ name: '', region: '', group: '', tags: '' });
 const protocolDrafts = reactive<Record<string, ProtocolDraft>>({});
 const trafficDrafts = reactive<Record<string, TrafficDraft>>({});
 const trafficHistory = reactive<Record<string, TrafficSample[]>>({});
+const selectedNodeIds = ref<string[]>([]);
+const groupFilter = ref('all');
+const rankMode = ref<'total' | 'download' | 'upload'>('total');
+const trafficRank = ref<PulseTrafficRankItem[]>([]);
+const persistedTrafficHistory = ref<PulseTrafficHistoryItem[]>([]);
+const historyNodeId = ref('');
 const trafficSocketState = ref<TrafficSocketState>('connecting');
 const singBoxDrafts = reactive<Record<string, { version: string; downloadUrl: string; sha256: string }>>({});
 const installDrawerVisible = ref(false);
@@ -46,7 +64,8 @@ let trafficSocket: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let allowReconnect = true;
 
-const columns = computed(() => [
+const columns = computed<DataTableColumns<PulseNode>>(() => [
+  { type: 'selection', width: 44 },
   { title: '节点', key: 'name', minWidth: 160 },
   {
     title: '区域',
@@ -131,12 +150,31 @@ const columns = computed(() => [
   }
 ]);
 
+const visibleNodes = computed(() => {
+  const group = groupFilter.value;
+  return nodes.value.filter(node => group === 'all' || (node.group || '未分组') === group);
+});
+
+const groupOptions = computed(() => [
+  { label: '全部分组', value: 'all' },
+  ...[...new Set(nodes.value.map(node => node.group || '未分组'))]
+    .sort((a, b) => a.localeCompare(b))
+    .map(group => ({ label: group, value: group }))
+]);
+
+const historyNodeOptions = computed(() => nodes.value.map(node => ({ label: node.name, value: node.id })));
+
+function rowKey(row: PulseNode) {
+  return row.id;
+}
+
 async function loadData() {
   loading.value = true;
   try {
     const [nodeRes, protocolRes] = await Promise.all([fetchPulseNodes(), fetchPulseProtocols()]);
     nodes.value = nodeRes.items;
     protocolMetas.value = protocolRes.items;
+    if (!historyNodeId.value && nodes.value[0]) historyNodeId.value = nodes.value[0].id;
     for (const node of nodes.value) {
       draftFor(node);
       trafficDraftFor(node);
@@ -158,6 +196,7 @@ async function loadData() {
         Date.now()
       );
     }
+    await loadTrafficAnalytics();
   } finally {
     loading.value = false;
   }
@@ -167,6 +206,7 @@ async function submit() {
   const node = await createPulseNode({
     name: form.name || '新节点',
     region: form.region || undefined,
+    group: form.group || undefined,
     tags: form.tags
       .split(',')
       .map(tag => tag.trim())
@@ -175,7 +215,10 @@ async function submit() {
   nodes.value.unshift(node);
   form.name = '';
   form.region = '';
+  form.group = '';
   form.tags = '';
+  if (!historyNodeId.value) historyNodeId.value = node.id;
+  await loadTrafficAnalytics();
   window.$message?.success('节点已创建');
 }
 
@@ -235,6 +278,54 @@ function openInstallDrawer(node: PulseNode) {
 async function queue(node: PulseNode, type: string) {
   const command = await queuePulseCommand(node.id, type);
   window.$message?.success(`${commandLabel(command.type)} 已下发，可在命令队列查看输出`);
+}
+
+async function batchQueue(type: string) {
+  if (!selectedNodeIds.value.length) {
+    window.$message?.warning('请先选择节点');
+    return;
+  }
+  const result = await batchPulseNodeCommand(selectedNodeIds.value, type);
+  window.$message?.success(`已批量下发 ${result.queued} 条${commandLabel(type)}命令`);
+}
+
+async function batchDelete() {
+  if (!selectedNodeIds.value.length) {
+    window.$message?.warning('请先选择节点');
+    return;
+  }
+  const result = await batchDeletePulseNodes(selectedNodeIds.value);
+  nodes.value = nodes.value.filter(node => !selectedNodeIds.value.includes(node.id));
+  selectedNodeIds.value = [];
+  await loadTrafficAnalytics();
+  window.$message?.success(`已删除 ${result.removedNodes} 个节点`);
+}
+
+async function moveNode(node: PulseNode, direction: -1 | 1) {
+  const index = nodes.value.findIndex(item => item.id === node.id);
+  const nextIndex = index + direction;
+  if (index < 0 || nextIndex < 0 || nextIndex >= nodes.value.length) return;
+  const next = nodes.value.slice();
+  const [current] = next.splice(index, 1);
+  next.splice(nextIndex, 0, current);
+  nodes.value = next;
+  const result = await reorderPulseNodes(nodes.value.map(item => item.id));
+  nodes.value = result.items;
+  window.$message?.success('节点顺序已保存');
+}
+
+async function copyNodeIps(node: PulseNode) {
+  const text = nodeIpRows(node)
+    .map(item => `${item.label}: ${item.value}`)
+    .join('\n');
+  if (await copyText(text)) window.$message?.success('节点 IP 已复制');
+  else window.$message?.error('复制失败');
+}
+
+async function copyIpValue(value: string) {
+  if (!value || value === '-') return;
+  if (await copyText(value)) window.$message?.success('IP 已复制');
+  else window.$message?.error('复制失败');
 }
 
 function singBoxDraftFor(node: PulseNode) {
@@ -330,9 +421,9 @@ async function removeProtocol(node: PulseNode, protocolId: string) {
 }
 
 async function saveRegion(node: PulseNode) {
-  const result = await updatePulseNode(node.id, { region: node.region });
+  const result = await updatePulseNode(node.id, { region: node.region, group: node.group });
   Object.assign(node, result);
-  window.$message?.success('区域已保存');
+  window.$message?.success('区域与分组已保存');
 }
 
 function trafficDraftFor(node: PulseNode) {
@@ -343,7 +434,10 @@ function trafficDraftFor(node: PulseNode) {
       limitMode: node.traffic?.limitMode || 'total',
       warningPercent: Number(node.traffic?.warningPercent) || 80,
       autoDisableSubscription: node.traffic?.autoDisableSubscription === true,
-      subscriptionEnabled: node.subscriptionEnabled === true
+      subscriptionEnabled: node.subscriptionEnabled === true,
+      resetMode: node.traffic?.resetMode || 'none',
+      resetDay: Number(node.traffic?.resetDay) || 1,
+      resetIntervalDays: Number(node.traffic?.resetIntervalDays) || 30
     };
   }
   return trafficDrafts[node.id];
@@ -358,13 +452,22 @@ async function saveTrafficPolicy(node: PulseNode) {
       thresholdBytes: thresholdGb > 0 ? Math.round(thresholdGb * 1024 ** 3) : 0,
       limitMode: draft.limitMode,
       warningPercent: draft.warningPercent,
-      autoDisableSubscription: draft.autoDisableSubscription
+      autoDisableSubscription: draft.autoDisableSubscription,
+      resetMode: draft.resetMode,
+      resetDay: draft.resetDay,
+      resetIntervalDays: draft.resetIntervalDays
     }
   });
   Object.assign(node, result);
   delete trafficDrafts[node.id];
   trafficDraftFor(node);
   window.$message?.success('流量策略已保存');
+}
+
+async function resetNodeTraffic(node: PulseNode) {
+  await resetPulseTraffic([node.id]);
+  await loadData();
+  window.$message?.success('节点流量已清零');
 }
 
 function ipModeLabel(value?: string) {
@@ -382,6 +485,38 @@ function ipModeLabel(value?: string) {
 
 function displayNodeRegion(node: PulseNode) {
   return node.displayRegion || node.region || '等待 Agent 上报';
+}
+
+function nodeIpRows(node: PulseNode): NodeIpRow[] {
+  const rows: NodeIpRow[] = [];
+  const addresses = node.addresses || [];
+  const publicAddresses = node.network?.publicAddresses || [];
+  const firstAddress = (family: 'ipv4' | 'ipv6') =>
+    publicAddresses.find(item => item.family === family)?.address || addresses.find(item => item.family === family)?.address || '';
+  const warpAddresses = addresses
+    .filter(item => /warp|wgcf|wireguard|^wg/i.test(item.interface || ''))
+    .map(item => item.address)
+    .filter(Boolean);
+
+  if (node.network?.warpLikely || warpAddresses.length) {
+    const value = warpAddresses.length
+      ? [...new Set(warpAddresses)].join(' / ')
+      : [node.network?.primaryIpv4, node.network?.primaryIpv6].filter(Boolean).join(' / ') || '已识别';
+    rows.push({ label: 'WARP', value, tone: 'warp' });
+  }
+
+  rows.push({
+    label: 'IPv4',
+    value: node.network?.primaryIpv4 || firstAddress('ipv4') || '-',
+    tone: node.network?.primaryIpv4 || firstAddress('ipv4') ? 'ipv4' : 'muted'
+  });
+  rows.push({
+    label: 'IPv6',
+    value: node.network?.primaryIpv6 || firstAddress('ipv6') || '-',
+    tone: node.network?.primaryIpv6 || firstAddress('ipv6') ? 'ipv6' : 'muted'
+  });
+
+  return rows;
 }
 
 function commandLabel(type: string) {
@@ -503,6 +638,63 @@ function trafficLimitModeOptions() {
   ];
 }
 
+function resetModeOptions() {
+  return [
+    { label: '不自动重置', value: 'none' },
+    { label: '每日', value: 'daily' },
+    { label: '每周', value: 'weekly' },
+    { label: '每月', value: 'monthly' },
+    { label: '间隔天数', value: 'interval' }
+  ];
+}
+
+async function loadTrafficAnalytics() {
+  const [rankRes, historyRes] = await Promise.all([
+    fetchPulseTrafficRank(rankMode.value, 20),
+    fetchPulseTrafficHistory({ nodeId: historyNodeId.value || undefined, limit: 240 })
+  ]);
+  trafficRank.value = rankRes.items;
+  persistedTrafficHistory.value = historyRes.items.slice().reverse();
+}
+
+async function refreshTrafficAnalytics() {
+  await loadTrafficAnalytics();
+  window.$message?.success('流量分析已刷新');
+}
+
+function persistedTrafficPeak() {
+  return Math.max(
+    1,
+    ...persistedTrafficHistory.value.flatMap(item => [Number(item.rxRateBytesPerSecond) || 0, Number(item.txRateBytesPerSecond) || 0])
+  );
+}
+
+function persistedTrafficPath(direction: 'rx' | 'tx') {
+  const samples = persistedTrafficHistory.value;
+  if (samples.length < 2) return '';
+  const width = 360;
+  const height = 72;
+  const peak = persistedTrafficPeak();
+  return samples
+    .map((sample, index) => {
+      const value = direction === 'rx' ? sample.rxRateBytesPerSecond : sample.txRateBytesPerSecond;
+      const x = (index / (samples.length - 1)) * width;
+      const y = height - (Math.max(0, value) / peak) * height;
+      return `${x.toFixed(1)},${Math.max(0, Math.min(height, y)).toFixed(1)}`;
+    })
+    .join(' ');
+}
+
+async function resetSelectedTraffic() {
+  if (!selectedNodeIds.value.length) {
+    window.$message?.warning('请先选择节点');
+    return;
+  }
+  const result = await resetPulseTraffic(selectedNodeIds.value);
+  await loadData();
+  window.$message?.success(`已清零 ${result.reset} 个节点流量`);
+}
+
 function trafficSocketTagType() {
   if (trafficSocketState.value === 'live') return 'success';
   if (trafficSocketState.value === 'connecting' || trafficSocketState.value === 'reconnecting') return 'warning';
@@ -579,6 +771,7 @@ async function removeNode(node: PulseNode) {
   delete trafficHistory[node.id];
   delete trafficDrafts[node.id];
   delete protocolDrafts[node.id];
+  await loadTrafficAnalytics();
   window.$message?.success(`节点已删除，清理 Agent ${result.removedAgents} 个、命令 ${result.removedCommands} 条`);
 }
 
@@ -598,16 +791,19 @@ onUnmounted(() => {
   <NSpace vertical :size="16">
     <NCard title="新建 sing-box 节点" :bordered="false" class="card-wrapper">
       <NGrid :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
-        <NGi span="24 s:8">
+        <NGi span="24 s:6">
           <NInput v-model:value="form.name" placeholder="节点名称" />
         </NGi>
         <NGi span="24 s:6">
           <NInput v-model:value="form.region" placeholder="区域可留空，Agent 上线后自动识别" />
         </NGi>
-        <NGi span="24 s:7">
+        <NGi span="24 s:5">
+          <NInput v-model:value="form.group" placeholder="分组，可选" />
+        </NGi>
+        <NGi span="24 s:5">
           <NInput v-model:value="form.tags" placeholder="标签，逗号分隔" />
         </NGi>
-        <NGi span="24 s:3">
+        <NGi span="24 s:2">
           <NButton type="primary" block @click="submit">创建</NButton>
         </NGi>
       </NGrid>
@@ -620,25 +816,109 @@ onUnmounted(() => {
           <NButton size="small" :loading="loading" @click="loadData">刷新</NButton>
         </NSpace>
       </template>
-      <NDataTable :columns="columns" :data="nodes" :loading="loading" :bordered="false" />
+      <div class="bulk-toolbar">
+        <NSelect v-model:value="groupFilter" size="small" :options="groupOptions" class="toolbar-select" />
+        <NButton size="small" secondary @click="batchQueue('probe')">批量探测</NButton>
+        <NButton size="small" secondary @click="batchQueue('diagnostics')">批量诊断</NButton>
+        <NButton size="small" type="primary" secondary @click="batchQueue('sing-box-apply')">批量应用</NButton>
+        <NButton size="small" secondary @click="resetSelectedTraffic">清零流量</NButton>
+        <NPopconfirm @positive-click="batchDelete">
+          <template #trigger>
+            <NButton size="small" type="error" secondary>批量删除</NButton>
+          </template>
+          删除已选择的 {{ selectedNodeIds.length }} 个节点？
+        </NPopconfirm>
+        <NText depth="3">已选 {{ selectedNodeIds.length }} / {{ visibleNodes.length }}</NText>
+      </div>
+      <NDataTable
+        v-model:checked-row-keys="selectedNodeIds"
+        :columns="columns"
+        :data="visibleNodes"
+        :loading="loading"
+        :bordered="false"
+        :row-key="rowKey"
+      />
     </NCard>
 
     <NGrid :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
-      <NGi v-for="node in nodes" :key="node.id" span="24 l:12 2xl:8">
+      <NGi span="24 l:9">
+        <NCard title="流量排行" :bordered="false" class="card-wrapper compact-card">
+          <template #header-extra>
+            <NSpace :size="8" align="center">
+              <NSelect v-model:value="rankMode" size="small" :options="trafficLimitModeOptions()" class="rank-mode" @update:value="loadTrafficAnalytics" />
+              <NButton size="small" secondary @click="refreshTrafficAnalytics">刷新</NButton>
+            </NSpace>
+          </template>
+          <div class="rank-list">
+            <div v-for="(item, index) in trafficRank" :key="item.nodeId" class="rank-row">
+              <span>{{ index + 1 }}</span>
+              <strong>{{ item.name }}</strong>
+              <em>{{ formatBytes(item.usageBytes) }}</em>
+            </div>
+          </div>
+          <NEmpty v-if="!trafficRank.length" size="small" description="暂无流量排行" />
+        </NCard>
+      </NGi>
+      <NGi span="24 l:15">
+        <NCard title="历史流量" :bordered="false" class="card-wrapper compact-card">
+          <template #header-extra>
+            <NSpace :size="8" align="center">
+              <NSelect
+                v-model:value="historyNodeId"
+                size="small"
+                :options="historyNodeOptions"
+                class="history-node-select"
+                placeholder="选择节点"
+                @update:value="loadTrafficAnalytics"
+              />
+              <NButton size="small" secondary @click="refreshTrafficAnalytics">刷新</NButton>
+            </NSpace>
+          </template>
+          <div class="history-chart">
+            <svg viewBox="0 0 360 72" preserveAspectRatio="none" aria-hidden="true">
+              <line x1="0" y1="71.5" x2="360" y2="71.5" class="axis-line" />
+              <polyline v-if="persistedTrafficPath('rx')" :points="persistedTrafficPath('rx')" class="traffic-line rx-line" />
+              <polyline v-if="persistedTrafficPath('tx')" :points="persistedTrafficPath('tx')" class="traffic-line tx-line" />
+            </svg>
+            <div v-if="persistedTrafficHistory.length < 2" class="traffic-empty">等待历史样本</div>
+          </div>
+          <div class="history-meta">
+            <span>样本 {{ persistedTrafficHistory.length }}</span>
+            <span>峰值 {{ formatRate(persistedTrafficPeak()) }}</span>
+          </div>
+        </NCard>
+      </NGi>
+    </NGrid>
+
+    <NGrid :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
+      <NGi v-for="node in visibleNodes" :key="node.id" span="24 l:12 2xl:8">
         <NCard :bordered="false" class="card-wrapper node-card">
           <div class="node-head">
             <div class="min-w-0">
               <div class="node-title">{{ node.name }}</div>
               <div class="node-subtitle">
-                {{ displayNodeRegion(node) }} · {{ node.network?.primaryIpv4 || node.network?.primaryIpv6 || '等待 Agent 上报' }}
+                {{ displayNodeRegion(node) }} · {{ ipModeLabel(node.network?.ipMode) }}
               </div>
             </div>
             <NTag :type="node.online ? 'success' : 'warning'" size="small" round>{{ node.online ? '在线' : node.agentStatus }}</NTag>
           </div>
 
+          <div class="ip-strip">
+            <div
+              v-for="item in nodeIpRows(node)"
+              :key="item.label"
+              class="ip-pill"
+              :class="`ip-pill-${item.tone}`"
+              @click="copyIpValue(item.value)"
+            >
+              <span>{{ item.label }}</span>
+              <strong :title="item.value">{{ item.value }}</strong>
+            </div>
+          </div>
+
           <div class="metric-grid">
             <div class="metric-item">
-              <span>IP</span>
+              <span>模式</span>
               <strong>{{ ipModeLabel(node.network?.ipMode) }}</strong>
             </div>
             <div class="metric-item">
@@ -707,11 +987,14 @@ onUnmounted(() => {
           </div>
 
           <NGrid :x-gap="8" :y-gap="8" responsive="screen" item-responsive class="mt-10px">
-            <NGi span="24 s:17">
+            <NGi span="24 s:11">
               <NInput v-model:value="node.region" size="small" placeholder="手动修正区域" />
             </NGi>
             <NGi span="24 s:7">
-              <NButton size="small" block secondary @click="saveRegion(node)">保存区域</NButton>
+              <NInput v-model:value="node.group" size="small" placeholder="分组" />
+            </NGi>
+            <NGi span="24 s:6">
+              <NButton size="small" block secondary @click="saveRegion(node)">保存</NButton>
             </NGi>
           </NGrid>
 
@@ -820,8 +1103,32 @@ onUnmounted(() => {
             <NGi span="12 s:4">
               <NCheckbox v-model:checked="trafficDraftFor(node).subscriptionEnabled">订阅启用</NCheckbox>
             </NGi>
-            <NGi span="24 s:3">
+            <NGi span="12 s:5">
+              <NSelect v-model:value="trafficDraftFor(node).resetMode" size="small" :options="resetModeOptions()" />
+            </NGi>
+            <NGi v-if="trafficDraftFor(node).resetMode === 'monthly'" span="12 s:4">
+              <NInputNumber v-model:value="trafficDraftFor(node).resetDay" size="small" :min="1" :max="31" placeholder="日期" class="w-full" />
+            </NGi>
+            <NGi v-if="trafficDraftFor(node).resetMode === 'interval'" span="12 s:4">
+              <NInputNumber
+                v-model:value="trafficDraftFor(node).resetIntervalDays"
+                size="small"
+                :min="1"
+                :max="365"
+                placeholder="天数"
+                class="w-full"
+              />
+            </NGi>
+            <NGi span="12 s:3">
               <NButton size="small" block secondary @click="saveTrafficPolicy(node)">保存</NButton>
+            </NGi>
+            <NGi span="12 s:3">
+              <NPopconfirm @positive-click="resetNodeTraffic(node)">
+                <template #trigger>
+                  <NButton size="small" block secondary>清零</NButton>
+                </template>
+                清零 {{ node.name }} 当前流量统计？
+              </NPopconfirm>
             </NGi>
           </NGrid>
 
@@ -830,6 +1137,9 @@ onUnmounted(() => {
           <div class="node-actions">
             <NButton size="small" @click="openInstallDrawer(node)">安装命令</NButton>
             <NButton size="small" @click="copyInstall(node)">复制安装</NButton>
+            <NButton size="small" @click="copyNodeIps(node)">复制 IP</NButton>
+            <NButton size="small" @click="moveNode(node, -1)">上移</NButton>
+            <NButton size="small" @click="moveNode(node, 1)">下移</NButton>
             <NButton size="small" @click="queue(node, 'probe')">探测</NButton>
             <NButton size="small" @click="queue(node, 'diagnostics')">诊断</NButton>
             <NButton size="small" @click="queue(node, 'sing-box-render')">渲染</NButton>
@@ -888,6 +1198,91 @@ onUnmounted(() => {
   gap: 8px;
 }
 
+.bulk-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.toolbar-select {
+  width: 150px;
+}
+
+.compact-card :deep(.n-card__content) {
+  padding-top: 10px;
+}
+
+.rank-mode {
+  width: 96px;
+}
+
+.history-node-select {
+  width: min(220px, 46vw);
+}
+
+.rank-list {
+  display: grid;
+  gap: 7px;
+}
+
+.rank-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 5px 7px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.rank-row span {
+  color: var(--n-text-color-disabled, #64748b);
+  font-size: 11px;
+}
+
+.rank-row strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--n-text-color, #1f2937);
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rank-row em {
+  color: #2563eb;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.history-chart {
+  position: relative;
+  height: 84px;
+  overflow: hidden;
+}
+
+.history-chart svg {
+  display: block;
+  width: 100%;
+  height: 72px;
+}
+
+.history-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--n-text-color-disabled, #64748b);
+  font-size: 11px;
+  line-height: 16px;
+}
+
 .node-card :deep(.n-card__content) {
   padding-top: 14px;
 }
@@ -918,6 +1313,62 @@ onUnmounted(() => {
   line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.ip-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(142px, 1fr));
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.ip-pill {
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.07);
+  cursor: pointer;
+}
+
+.ip-pill span {
+  display: block;
+  color: var(--n-text-color-disabled, #64748b);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 14px;
+}
+
+.ip-pill strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--n-text-color, #1f2937);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ip-pill-warp {
+  border-color: rgba(14, 165, 233, 0.26);
+  background: rgba(14, 165, 233, 0.08);
+}
+
+.ip-pill-ipv4 {
+  border-color: rgba(37, 99, 235, 0.24);
+  background: rgba(37, 99, 235, 0.07);
+}
+
+.ip-pill-ipv6 {
+  border-color: rgba(5, 150, 105, 0.24);
+  background: rgba(5, 150, 105, 0.07);
+}
+
+.ip-pill-muted {
+  opacity: 0.72;
 }
 
 .metric-grid {
@@ -1134,6 +1585,15 @@ onUnmounted(() => {
 }
 
 @media (max-width: 640px) {
+  .toolbar-select,
+  .history-node-select {
+    width: 100%;
+  }
+
+  .ip-strip {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

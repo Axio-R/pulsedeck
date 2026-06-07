@@ -69,6 +69,7 @@ async function openWebSocket(base, path) {
   return {
     socket,
     close: () => socket.close(),
+    sendJson: (body) => socket.send(JSON.stringify(body)),
     readJson: () =>
       new Promise((resolve, reject) => {
         if (messages.length) {
@@ -93,8 +94,8 @@ test('health reports PulseDeck on default product port', async () => {
     const { res, body } = await request(app.base, '/api/v1/health');
     assert.equal(res.status, 200);
     assert.equal(body.name, 'PulseDeck');
-    assert.equal(body.version, '0.2.5');
-    assert.equal(body.agentVersion, '0.2.5-rust');
+    assert.equal(body.version, '0.2.6');
+    assert.equal(body.agentVersion, '0.2.6-rust');
     assert.equal(body.port, 14770);
   } finally {
     await app.close();
@@ -106,7 +107,7 @@ test('agent runtime manifest exposes target metadata', async () => {
   try {
     const { res, body } = await request(app.base, '/api/v1/agents/runtime/manifest');
     assert.equal(res.status, 200);
-    assert.equal(body.agentVersion, '0.2.5-rust');
+    assert.equal(body.agentVersion, '0.2.6-rust');
     assert.ok(Array.isArray(body.targets));
     assert.deepEqual(
       body.targets.map((target) => target.target),
@@ -121,7 +122,7 @@ test('agent runtime manifest exposes target metadata', async () => {
     const single = await request(app.base, '/api/v1/agents/runtime/manifest/linux-x64');
     assert.equal(single.res.status, 200);
     assert.equal(single.body.target, 'linux-x64');
-    assert.equal(single.body.version, '0.2.5-rust');
+    assert.equal(single.body.version, '0.2.6-rust');
   } finally {
     await app.close();
   }
@@ -577,6 +578,162 @@ test('traffic websocket streams live node traffic snapshots', async () => {
     assert.equal(dashboard.body.traffic.totalBytes, 4000);
     assert.equal(dashboard.body.traffic.rxRateBytesPerSecond, 1500);
     assert.equal(dashboard.body.traffic.txRateBytesPerSecond, 2500);
+  } finally {
+    ws?.close();
+    await app.close();
+  }
+});
+
+test('traffic history rank reset and node batch management work', async () => {
+  const app = await startServer();
+  try {
+    const login = await request(app.base, '/api/v1/auth/login', {
+      method: 'POST',
+      body: { username: 'admin', password: 'change-me' }
+    });
+    const auth = { authorization: `Bearer ${login.body.token}` };
+
+    const first = await request(app.base, '/api/v1/nodes', {
+      method: 'POST',
+      headers: auth,
+      body: { name: 'alpha', group: 'edge' }
+    });
+    const second = await request(app.base, '/api/v1/nodes', {
+      method: 'POST',
+      headers: auth,
+      body: { name: 'beta', group: 'core' }
+    });
+    assert.equal(first.body.group, 'edge');
+    assert.equal(second.body.group, 'core');
+
+    const reordered = await request(app.base, '/api/v1/nodes/reorder', {
+      method: 'POST',
+      headers: auth,
+      body: { ids: [second.body.id, first.body.id] }
+    });
+    assert.equal(reordered.res.status, 200);
+    assert.deepEqual(
+      reordered.body.items.slice(0, 2).map((node) => node.id),
+      [second.body.id, first.body.id]
+    );
+
+    const batch = await request(app.base, '/api/v1/nodes/batch-command', {
+      method: 'POST',
+      headers: auth,
+      body: { nodeIds: [first.body.id, second.body.id], type: 'diagnostics' }
+    });
+    assert.equal(batch.res.status, 201);
+    assert.equal(batch.body.queued, 2);
+
+    const enrolled = await request(app.base, `/api/v1/agents/enroll/${first.body.installId}`, {
+      method: 'POST',
+      body: { version: '0.2.5-rust', platform: 'linux', arch: 'x86_64', serviceMode: 'manual' }
+    });
+    const agentAuth = { authorization: `Bearer ${enrolled.body.token}` };
+    await request(app.base, `/api/v1/agents/${enrolled.body.agentId}/metrics`, {
+      method: 'POST',
+      headers: agentAuth,
+      body: { metrics: { network: { interfaces: [{ name: 'eth0', rxBytes: 1000, txBytes: 2000 }] } } }
+    });
+    await request(app.base, `/api/v1/agents/${enrolled.body.agentId}/metrics`, {
+      method: 'POST',
+      headers: agentAuth,
+      body: { metrics: { network: { interfaces: [{ name: 'eth0', rxBytes: 4000, txBytes: 7000 }] } } }
+    });
+
+    const history = await request(app.base, `/api/v1/traffic/history?nodeId=${first.body.id}&limit=10`, { headers: auth });
+    assert.equal(history.res.status, 200);
+    assert.ok(history.body.items.length >= 2);
+    assert.ok(history.body.items.some((item) => item.rxBytes === 3000 && item.txBytes === 5000));
+
+    const rank = await request(app.base, '/api/v1/traffic/rank?mode=total&limit=5', { headers: auth });
+    assert.equal(rank.res.status, 200);
+    assert.equal(rank.body.items[0].nodeId, first.body.id);
+    assert.equal(rank.body.items[0].usageBytes, 8000);
+
+    const reset = await request(app.base, '/api/v1/traffic/reset', {
+      method: 'POST',
+      headers: auth,
+      body: { nodeIds: [first.body.id] }
+    });
+    assert.equal(reset.res.status, 200);
+    assert.equal(reset.body.reset, 1);
+
+    const nodes = await request(app.base, '/api/v1/nodes', { headers: auth });
+    const resetNode = nodes.body.items.find((node) => node.id === first.body.id);
+    assert.equal(resetNode.traffic.totalBytes, 0);
+    assert.equal(resetNode.traffic.lastResetAt !== null, true);
+
+    const historyAfterReset = await request(app.base, `/api/v1/traffic/history?nodeId=${first.body.id}&limit=10`, { headers: auth });
+    assert.ok(historyAfterReset.body.items.some((item) => item.kind === 'manual-reset'));
+  } finally {
+    await app.close();
+  }
+});
+
+test('agent control websocket receives queued commands and reports results', async () => {
+  const app = await startServer();
+  let ws;
+  try {
+    const login = await request(app.base, '/api/v1/auth/login', {
+      method: 'POST',
+      body: { username: 'admin', password: 'change-me' }
+    });
+    const auth = { authorization: `Bearer ${login.body.token}` };
+
+    const created = await request(app.base, '/api/v1/nodes', {
+      method: 'POST',
+      headers: auth,
+      body: { name: 'control-node' }
+    });
+    const enrolled = await request(app.base, `/api/v1/agents/enroll/${created.body.installId}`, {
+      method: 'POST',
+      body: { version: '0.2.5-rust', platform: 'linux', arch: 'x86_64', serviceMode: 'manual' }
+    });
+
+    ws = await openWebSocket(app.base, `/api/v1/agents/${enrolled.body.agentId}/control/stream?token=${enrolled.body.token}`);
+    const hello = await ws.readJson();
+    assert.equal(hello.type, 'hello');
+
+    const queued = await request(app.base, `/api/v1/nodes/${created.body.id}/commands`, {
+      method: 'POST',
+      headers: auth,
+      body: { type: 'probe' }
+    });
+    assert.equal(queued.res.status, 201);
+
+    const pushed = await ws.readJson();
+    assert.equal(pushed.type, 'command');
+    assert.equal(pushed.command.id, queued.body.id);
+    assert.equal(pushed.command.type, 'probe');
+
+    ws.sendJson({
+      type: 'command.event',
+      commandId: pushed.command.id,
+      stream: 'stdout',
+      message: 'ws progress',
+      payload: { step: 'probe' }
+    });
+    ws.sendJson({
+      type: 'command.result',
+      commandId: pushed.command.id,
+      status: 'succeeded',
+      result: { finishedAt: '3', data: { message: 'ws ok', reportedLinks: ['vless://ws.example'] } }
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const commands = await request(app.base, '/api/v1/commands', { headers: auth });
+    const command = commands.body.items.find((item) => item.id === pushed.command.id);
+    assert.equal(command.status, 'succeeded');
+
+    const events = await request(app.base, `/api/v1/commands/${pushed.command.id}/events?format=json`, { headers: auth });
+    assert.ok(events.body.items.some((event) => event.message.includes('控制通道')));
+    assert.ok(events.body.items.some((event) => event.message === 'ws progress'));
+    assert.ok(events.body.items.some((event) => event.payload?.transport === 'websocket'));
+
+    const nodes = await request(app.base, '/api/v1/nodes', { headers: auth });
+    const node = nodes.body.items.find((item) => item.id === created.body.id);
+    assert.deepEqual(node.reportedLinks, ['vless://ws.example']);
   } finally {
     ws?.close();
     await app.close();

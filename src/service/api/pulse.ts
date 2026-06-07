@@ -58,6 +58,8 @@ export interface PulseNode {
   region: string;
   displayRegion: string;
   regionOverride: boolean;
+  group: string;
+  order: number;
   tags: string[];
   installId: string;
   status: string;
@@ -111,6 +113,11 @@ export interface PulseNode {
     warningPercent: number;
     autoDisableSubscription: boolean;
     thresholdExceededAt: string | null;
+    resetMode: 'none' | 'daily' | 'weekly' | 'monthly' | 'interval';
+    resetDay: number;
+    resetIntervalDays: number;
+    resetAnchorAt: string | null;
+    lastResetAt: string | null;
     updatedAt: string | null;
   };
   alertState: {
@@ -218,6 +225,35 @@ export interface PulseTrafficEvent {
   items?: PulseTrafficNode[];
 }
 
+export interface PulseTrafficHistoryItem {
+  id: string;
+  nodeId: string;
+  rxBytes: number;
+  txBytes: number;
+  totalBytes: number;
+  rxRateBytesPerSecond: number;
+  txRateBytesPerSecond: number;
+  totalRxBytes: number;
+  totalTxBytes: number;
+  cumulativeBytes: number;
+  kind: string;
+  createdAt: string;
+}
+
+export interface PulseTrafficRankItem {
+  nodeId: string;
+  name: string;
+  group: string;
+  region: string;
+  online: boolean;
+  totalRxBytes: number;
+  totalTxBytes: number;
+  totalBytes: number;
+  usageBytes: number;
+  limitMode: 'total' | 'download' | 'upload';
+  updatedAt: string | null;
+}
+
 export interface PulseProfile {
   id: string;
   name: string;
@@ -296,16 +332,54 @@ export function fetchPulseProtocols() {
   return pulseFetch<{ items: PulseProtocolMeta[] }>('/protocols');
 }
 
-export function createPulseNode(body: { name: string; region?: string; tags?: string[] }) {
+export function createPulseNode(body: { name: string; region?: string; group?: string; tags?: string[] }) {
   return pulseFetch<PulseNode>('/nodes', { method: 'POST', body });
 }
 
-export function updatePulseNode(id: string, body: Partial<Pick<PulseNode, 'name' | 'region' | 'tags' | 'subscriptionEnabled'>> & { traffic?: Partial<PulseNode['traffic']> }) {
+export function updatePulseNode(
+  id: string,
+  body: Partial<Pick<PulseNode, 'name' | 'region' | 'group' | 'order' | 'tags' | 'subscriptionEnabled'>> & { traffic?: Partial<PulseNode['traffic']> }
+) {
   return pulseFetch<PulseNode>(`/nodes/${id}`, { method: 'PATCH', body });
 }
 
 export function deletePulseNode(id: string) {
-  return pulseFetch<{ deleted: boolean; removedAgents: number; removedCommands: number; removedAlertEvents: number }>(`/nodes/${id}`, { method: 'DELETE' });
+  return pulseFetch<{ deleted: boolean; removedNodes: number; removedAgents: number; removedCommands: number; removedAlertEvents: number; removedTrafficHistory: number }>(
+    `/nodes/${id}`,
+    { method: 'DELETE' }
+  );
+}
+
+export function reorderPulseNodes(ids: string[]) {
+  return pulseFetch<{ updated: boolean; items: PulseNode[] }>('/nodes/reorder', { method: 'POST', body: { ids } });
+}
+
+export function batchPulseNodeCommand(nodeIds: string[], type: string, payload: Record<string, unknown> = {}) {
+  return pulseFetch<{ queued: number; items: PulseCommand[] }>('/nodes/batch-command', { method: 'POST', body: { nodeIds, type, payload } });
+}
+
+export function batchDeletePulseNodes(nodeIds: string[]) {
+  return pulseFetch<{ deleted: boolean; removedNodes: number; removedAgents: number; removedCommands: number; removedAlertEvents: number; removedTrafficHistory: number }>(
+    '/nodes/batch-delete',
+    { method: 'POST', body: { nodeIds } }
+  );
+}
+
+export function fetchPulseTrafficHistory(params: { nodeId?: string; since?: string; limit?: number } = {}) {
+  const search = new URLSearchParams();
+  if (params.nodeId) search.set('nodeId', params.nodeId);
+  if (params.since) search.set('since', params.since);
+  if (params.limit) search.set('limit', String(params.limit));
+  const query = search.toString();
+  return pulseFetch<{ items: PulseTrafficHistoryItem[] }>(`/traffic/history${query ? `?${query}` : ''}`);
+}
+
+export function fetchPulseTrafficRank(mode: 'total' | 'download' | 'upload' = 'total', limit = 20) {
+  return pulseFetch<{ mode: 'total' | 'download' | 'upload'; items: PulseTrafficRankItem[] }>(`/traffic/rank?mode=${mode}&limit=${limit}`);
+}
+
+export function resetPulseTraffic(nodeIds: string[] = []) {
+  return pulseFetch<{ reset: number }>('/traffic/reset', { method: 'POST', body: { nodeIds } });
 }
 
 export function resetPulseNodeLinks(id: string) {

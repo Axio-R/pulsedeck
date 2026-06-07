@@ -68,6 +68,7 @@ function normalizePort(value, fallback = 443) {
 
 function normalizeTraffic(input = {}) {
   const limitMode = ['total', 'download', 'upload'].includes(input.limitMode) ? input.limitMode : 'total';
+  const resetMode = ['none', 'daily', 'weekly', 'monthly', 'interval'].includes(input.resetMode) ? input.resetMode : 'none';
   return {
     totalRxBytes: Number(input.totalRxBytes) || 0,
     totalTxBytes: Number(input.totalTxBytes) || 0,
@@ -83,6 +84,11 @@ function normalizeTraffic(input = {}) {
     warningPercent: Number(input.warningPercent) || 80,
     autoDisableSubscription: input.autoDisableSubscription === true,
     thresholdExceededAt: input.thresholdExceededAt || null,
+    resetMode,
+    resetDay: Math.min(Math.max(Number(input.resetDay) || 1, 1), 31),
+    resetIntervalDays: Math.min(Math.max(Number(input.resetIntervalDays) || 30, 1), 365),
+    resetAnchorAt: input.resetAnchorAt || null,
+    lastResetAt: input.lastResetAt || null,
     updatedAt: input.updatedAt || null
   };
 }
@@ -174,6 +180,7 @@ export function createEmptyData() {
     commands: [],
     commandEvents: [],
     alertEvents: [],
+    trafficHistory: [],
     subscriptionProfiles: DEFAULT_SUBSCRIPTION_PROFILES.map((profile) => ({
       ...profile,
       token: randomToken(18),
@@ -222,6 +229,7 @@ export function hydrateData(input) {
     commands: Array.isArray(data.commands) ? data.commands : [],
     commandEvents: Array.isArray(data.commandEvents) ? data.commandEvents : [],
     alertEvents: Array.isArray(data.alertEvents) ? data.alertEvents : [],
+    trafficHistory: Array.isArray(data.trafficHistory) ? data.trafficHistory : [],
     subscriptionProfiles: Array.isArray(data.subscriptionProfiles) ? data.subscriptionProfiles : [],
     notificationChannels: {
       telegram: {
@@ -273,6 +281,8 @@ export function hydrateData(input) {
     name: node.name || '未命名节点',
     region: node.region || node.network?.detectedRegion || '',
     regionOverride: node.regionOverride === true || node.network?.regionSource === 'manual',
+    group: String(node.group || node.region || '').trim(),
+    order: Number.isFinite(Number(node.order)) ? Number(node.order) : indexFallbackOrder(node),
     tags: Array.isArray(node.tags) ? node.tags : [],
     installId: node.installId || randomToken(24),
     status: node.status || 'pending',
@@ -293,6 +303,13 @@ export function hydrateData(input) {
     createdAt: node.createdAt || now,
     updatedAt: node.updatedAt || now
   }));
+
+  hydrated.nodes
+    .slice()
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+    .forEach((node, index) => {
+      if (!Number.isFinite(Number(node.order)) || Number(node.order) < 0) node.order = index + 1;
+    });
 
   hydrated.agents = hydrated.agents.map((agent) => ({
     id: agent.id || randomUUID(),
@@ -350,7 +367,29 @@ export function hydrateData(input) {
     updatedAt: event.updatedAt || now
   }));
 
+  hydrated.trafficHistory = hydrated.trafficHistory
+    .map((item) => ({
+      id: item.id || randomUUID(),
+      nodeId: item.nodeId || '',
+      rxBytes: Number(item.rxBytes) || 0,
+      txBytes: Number(item.txBytes) || 0,
+      totalBytes: Number(item.totalBytes) || 0,
+      rxRateBytesPerSecond: Number(item.rxRateBytesPerSecond) || 0,
+      txRateBytesPerSecond: Number(item.txRateBytesPerSecond) || 0,
+      totalRxBytes: Number(item.totalRxBytes) || 0,
+      totalTxBytes: Number(item.totalTxBytes) || 0,
+      cumulativeBytes: Number(item.cumulativeBytes) || Number(item.totalBytes) || 0,
+      kind: item.kind || 'sample',
+      createdAt: item.createdAt || now
+    }))
+    .filter((item) => item.nodeId);
+
   return hydrated;
+}
+
+function indexFallbackOrder(node) {
+  const parsed = Number(node.order);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : Number.MAX_SAFE_INTEGER;
 }
 
 export function createNode(input = {}) {
@@ -360,6 +399,8 @@ export function createNode(input = {}) {
     name: String(input.name || '新节点').trim() || '新节点',
     region: String(input.region || '').trim(),
     regionOverride: Boolean(String(input.region || '').trim()),
+    group: String(input.group || input.region || '').trim(),
+    order: Number.isFinite(Number(input.order)) ? Number(input.order) : Date.now(),
     tags: Array.isArray(input.tags)
       ? input.tags.map((tag) => String(tag).trim()).filter(Boolean)
       : [],
