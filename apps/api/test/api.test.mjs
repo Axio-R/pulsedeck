@@ -96,8 +96,8 @@ test('health reports PulseDeck on default product port', async () => {
     const { res, body } = await request(app.base, '/api/v1/health');
     assert.equal(res.status, 200);
     assert.equal(body.name, 'PulseDeck');
-    assert.equal(body.version, '0.2.10');
-    assert.equal(body.agentVersion, '0.2.10-rust');
+    assert.equal(body.version, '0.2.11');
+    assert.equal(body.agentVersion, '0.2.11-rust');
     assert.equal(body.port, 14770);
   } finally {
     await app.close();
@@ -109,7 +109,7 @@ test('agent runtime manifest exposes target metadata', async () => {
   try {
     const { res, body } = await request(app.base, '/api/v1/agents/runtime/manifest');
     assert.equal(res.status, 200);
-    assert.equal(body.agentVersion, '0.2.10-rust');
+    assert.equal(body.agentVersion, '0.2.11-rust');
     assert.ok(Array.isArray(body.targets));
     assert.deepEqual(
       body.targets.map((target) => target.target),
@@ -124,7 +124,7 @@ test('agent runtime manifest exposes target metadata', async () => {
     const single = await request(app.base, '/api/v1/agents/runtime/manifest/linux-x64');
     assert.equal(single.res.status, 200);
     assert.equal(single.body.target, 'linux-x64');
-    assert.equal(single.body.version, '0.2.10-rust');
+    assert.equal(single.body.version, '0.2.11-rust');
   } finally {
     await app.close();
   }
@@ -415,7 +415,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.equal(discovered.displayRegion, 'GeoIP 未配置');
     assert.equal(discovered.agent.version, '0.1.0-rust');
     assert.equal(discovered.agent.target, 'linux-x64');
-    assert.equal(discovered.agent.latestVersion, '0.2.10-rust');
+    assert.equal(discovered.agent.latestVersion, '0.2.11-rust');
     assert.equal(discovered.agent.updateAvailable, true);
     assert.equal(discovered.agent.remoteUpdateSupported, false);
 
@@ -460,7 +460,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     await request(app.base, `/api/v1/agents/enroll/${warpNode.body.installId}`, {
       method: 'POST',
       body: {
-        version: '0.2.10-rust',
+        version: '0.2.11-rust',
         platform: 'linux',
         arch: 'x86_64',
         installDir: '/var/lib/pulsedeck',
@@ -512,6 +512,12 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.equal(added.res.status, 201);
     assert.equal(added.body.protocol.type, 'vless');
     assert.equal(added.body.protocol.port, 443);
+    assert.match(added.body.protocol.settings.privateKey, /^[A-Za-z0-9_-]{43}$/);
+    assert.match(added.body.protocol.settings.publicKey, /^[A-Za-z0-9_-]{43}$/);
+    assert.equal(added.body.protocol.settings.serverName, 'www.cloudflare.com');
+    assert.equal(added.body.protocol.settings.handshakeServer, 'www.cloudflare.com');
+    assert.equal(added.body.protocol.settings.handshakePort, 443);
+    assert.equal(added.body.protocol.settings.fingerprint, 'chrome');
     assert.equal(added.body.command.type, 'protocol-add');
 
     const queued = await request(app.base, `/api/v1/agents/${agentEnroll.body.agentId}/commands`, {
@@ -523,6 +529,8 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.equal(protocolCommand.node.id, created.body.id);
     assert.equal(protocolCommand.node.protocols.length, 1);
     assert.equal(protocolCommand.node.protocols[0].type, 'vless');
+    assert.equal(protocolCommand.node.protocols[0].settings.privateKey, added.body.protocol.settings.privateKey);
+    assert.equal(protocolCommand.node.protocols[0].settings.publicKey, added.body.protocol.settings.publicKey);
 
     const progressEvent = await request(app.base, `/api/v1/agents/${agentEnroll.body.agentId}/commands/${protocolCommand.id}/events`, {
       method: 'POST',
@@ -591,7 +599,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
               status: 'update-available',
               target: 'linux-x64',
               currentVersion: '0.1.0-rust',
-              latestVersion: '0.2.10-rust',
+              latestVersion: '0.2.11-rust',
               available: true,
               updateAvailable: true
             }
@@ -604,7 +612,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     const withAgentUpdate = listedAfterAgentCheck.body.items.find((node) => node.id === created.body.id);
     assert.equal(withAgentUpdate.agent.update.status, 'update-available');
     assert.equal(withAgentUpdate.agent.update.updateAvailable, true);
-    assert.equal(withAgentUpdate.agent.update.latestVersion, '0.2.10-rust');
+    assert.equal(withAgentUpdate.agent.update.latestVersion, '0.2.11-rust');
 
     const eventsAfterResult = await request(app.base, `/api/v1/commands/${protocolCommand.id}/events?format=json`, { headers: auth });
     assert.ok(eventsAfterResult.body.items.some((event) => event.type === 'result'));
@@ -1178,7 +1186,7 @@ test('subscription profiles protect defaults and delete custom profiles', async 
     });
     const hkAgent = await request(app.base, `/api/v1/agents/enroll/${hkNode.body.installId}`, {
       method: 'POST',
-      body: { version: '0.2.10-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
+      body: { version: '0.2.11-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
     });
     await request(app.base, `/api/v1/agents/${hkAgent.body.agentId}/metrics`, {
       method: 'POST',
@@ -1192,7 +1200,7 @@ test('subscription profiles protect defaults and delete custom profiles', async 
     });
     const usAgent = await request(app.base, `/api/v1/agents/enroll/${usNode.body.installId}`, {
       method: 'POST',
-      body: { version: '0.2.10-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
+      body: { version: '0.2.11-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
     });
     await request(app.base, `/api/v1/agents/${usAgent.body.agentId}/metrics`, {
       method: 'POST',

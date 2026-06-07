@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
 
 const DEFAULT_DATA_FILE = path.join(process.cwd(), '.data', 'pulsedeck.json');
 
@@ -70,6 +70,47 @@ function normalizePort(value, fallback = 443) {
   const number = Number(value);
   if (!Number.isInteger(number) || number < 1 || number > 65535) return fallback;
   return number;
+}
+
+function hasNonEmptySetting(settings, keys) {
+  return keys.some((key) => String(settings[key] || '').trim());
+}
+
+function isRealityProtocol(variant, security, settings) {
+  return [variant, security, settings.security]
+    .map((value) => String(value || '').trim().toLowerCase())
+    .includes('reality');
+}
+
+function generateRealityKeyPair() {
+  const { privateKey, publicKey } = generateKeyPairSync('x25519');
+  const privateJwk = privateKey.export({ format: 'jwk' });
+  const publicJwk = publicKey.export({ format: 'jwk' });
+  if (!privateJwk.d || !publicJwk.x) {
+    throw new Error('cannot generate Reality key pair');
+  }
+  return {
+    privateKey: privateJwk.d,
+    publicKey: publicJwk.x
+  };
+}
+
+function normalizeProtocolSettings(settings, variant, security) {
+  const normalized = settings && typeof settings === 'object' && !Array.isArray(settings) ? { ...settings } : {};
+  if (!isRealityProtocol(variant, security, normalized)) return normalized;
+
+  if (!hasNonEmptySetting(normalized, ['privateKey', 'private_key', 'realityPrivateKey'])) {
+    const pair = generateRealityKeyPair();
+    normalized.privateKey = pair.privateKey;
+    normalized.publicKey = pair.publicKey;
+  } else if (!hasNonEmptySetting(normalized, ['publicKey', 'realityPublicKey', 'pbk'])) {
+    normalized.publicKey = '';
+  }
+  normalized.handshakeServer = String(normalized.handshakeServer || normalized.handshake || normalized.dest || normalized.serverName || 'www.cloudflare.com').trim();
+  normalized.handshakePort = normalizePort(normalized.handshakePort || normalized.serverPort, 443);
+  normalized.serverName = String(normalized.serverName || normalized.sni || normalized.handshakeServer || 'www.cloudflare.com').trim();
+  normalized.fingerprint = String(normalized.fingerprint || normalized.fp || 'chrome').trim();
+  return normalized;
 }
 
 function normalizeTraffic(input = {}) {
@@ -178,6 +219,8 @@ export function createNodeProtocol(input = {}) {
   const timestamp = nowIso();
   const type = normalizeProtocolType(input.type);
   const port = normalizePort(input.port, defaultProtocolPort(type));
+  const variant = String(input.variant || '').trim();
+  const security = String(input.security || '').trim();
   return {
     id: input.id || randomUUID(),
     type,
@@ -185,10 +228,10 @@ export function createNodeProtocol(input = {}) {
     port,
     listen: String(input.listen || '0.0.0.0').trim() || '0.0.0.0',
     enabled: input.enabled !== false,
-    variant: String(input.variant || '').trim(),
+    variant,
     transport: String(input.transport || '').trim(),
-    security: String(input.security || '').trim(),
-    settings: input.settings && typeof input.settings === 'object' && !Array.isArray(input.settings) ? input.settings : {},
+    security,
+    settings: normalizeProtocolSettings(input.settings, variant, security),
     createdAt: input.createdAt || timestamp,
     updatedAt: input.updatedAt || timestamp
   };

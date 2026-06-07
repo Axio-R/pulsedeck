@@ -4,4 +4,4 @@ version = 4
 
 [[package]]
 name = "pulsedeck-agent"
-version = "0.2.5"
+version = "0.2.11"

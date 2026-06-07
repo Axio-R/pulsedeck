@@ -83,7 +83,27 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 
 ## Log
 
-### 2026-06-07
+### 2026-06-07 (`v0.2.11`)
+
+- Implementation direction for `v0.2.11`:
+  - Fix VLESS/AnyTLS Reality protocol creation so the panel generates and stores the required X25519 Reality private/public keypair before commands reach the Agent.
+  - Fix `pk update` and remote Agent update behavior so replacing the Agent binary is followed by a service restart attempt and the panel can receive the new version on the next report.
+- Implementation completed before commit:
+  - Added API-side Reality defaults: generated `privateKey`/`publicKey`, default `serverName`, `handshakeServer`, `handshakePort`, and `fingerprint`.
+  - Added API test coverage proving a new VLESS Reality protocol and the queued Agent command snapshot both include the generated Reality keypair.
+  - Updated the Rust Agent to `0.2.11-rust`, localized the missing Reality key error, and made local `pk update` restart systemd/OpenRC services after replacement.
+  - Synchronized package, API, Agent runtime, and Agent crate metadata to `0.2.11`.
+  - Made remote Agent update/restart commands schedule a short delayed service restart so command results can be reported before the Agent process restarts.
+- Local verification before commit:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 15 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `git diff --check`: passed.
+  - Local API smoke on port `6291`: passed; creating VLESS Reality returned 43-character `privateKey` and `publicKey` plus default Reality connection settings.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+
+### 2026-06-07 (`v0.2.10`)
 
 - Implementation direction for this turn:
   - Continue node management optimization with a smaller, denser node-card layout and fewer primary buttons.

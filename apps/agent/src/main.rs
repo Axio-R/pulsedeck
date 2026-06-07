@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const VERSION: &str = "0.2.10-rust";
+const VERSION: &str = "0.2.11-rust";
 const DEFAULT_SING_BOX_VERSION: &str = "1.11.15";
 
 #[derive(Clone, Debug)]
@@ -415,7 +415,15 @@ fn execute_agent_command(config: &Config, state: &State, agent_command: &AgentCo
     let outcome = match agent_command.kind.as_str() {
         "diagnostics" => Ok(collect_diagnostics_json(config)),
         "metrics" | "probe" => Ok(collect_metrics_json()),
-        "restart" => restart().map(|_| "{\"message\":\"Agent 已请求重启\"}".to_string()),
+        "restart" => {
+            let restart = schedule_agent_service_restart(config);
+            Ok(format!(
+                "{{\"message\":\"{}\",\"agentVersion\":\"{}\",\"restartScheduled\":{}}}",
+                json_escape(&restart.message),
+                json_escape(VERSION),
+                if restart.requested { "true" } else { "false" }
+            ))
+        }
         "agent-update-check" => agent_update_check_result(config),
         "agent-update" | "agent-upgrade" => agent_update_result(config),
         "reset-links" | "protocol-add" | "protocol-delete" => render_and_apply_sing_box(config, state, agent_command),
@@ -958,17 +966,9 @@ fn print_logs(lines: usize) -> Result<(), String> {
 }
 
 fn restart() -> Result<(), String> {
-    if command_exists("systemctl") {
-        let _ = Command::new("systemctl").args(["restart", "pulsedeck-agent.service"]).status();
-        println!("已通过 systemd 请求重启 Agent");
-        return Ok(());
-    }
-    if command_exists("rc-service") {
-        let _ = Command::new("rc-service").args(["pulsedeck-agent", "restart"]).status();
-        println!("已通过 OpenRC 请求重启 Agent");
-        return Ok(());
-    }
-    println!("未找到支持的服务管理器。请停止当前 Agent 进程后运行：pk daemon");
+    let config = load_config()?;
+    let outcome = restart_agent_service_now(&config);
+    println!("{}", outcome.message);
     Ok(())
 }
 
@@ -1186,12 +1186,17 @@ fn uninstall_agent(assume_yes: bool) -> Result<(), String> {
 
 fn update_self() -> Result<(), String> {
     let config = load_config()?;
-    update_self_with_config(&config).map(|outcome| {
-        println!("Agent 程序已更新，备份：{}", outcome.backup);
-        if !outcome.latest_version.is_empty() {
-            println!("更新后运行时版本：{}", blank_dash(&outcome.latest_version));
-        }
-    })
+    let outcome = update_self_with_config(&config)?;
+    println!("Agent 程序已更新，备份：{}", outcome.backup);
+    if !outcome.latest_version.is_empty() {
+        println!("更新后运行时版本：{}", blank_dash(&outcome.latest_version));
+    }
+    let restart = restart_agent_service_now(&config);
+    println!("{}", restart.message);
+    if !restart.requested {
+        println!("如果面板仍显示旧版本，请确认旧 Agent 进程已经重启。");
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1277,13 +1282,14 @@ fn agent_update_check_result(config: &Config) -> Result<String, String> {
 
 fn agent_update_result(config: &Config) -> Result<String, String> {
     let outcome = update_self_with_config(config)?;
+    let restart = schedule_agent_service_restart(config);
     let latest = if outcome.latest_version.is_empty() {
         outcome.current_version.as_str()
     } else {
         outcome.latest_version.as_str()
     };
     Ok(agent_update_json(
-        "Agent 程序已更新，重启 Agent 后生效",
+        &restart.message,
         "updated",
         &outcome.target,
         &outcome.current_version,
@@ -1295,6 +1301,106 @@ fn agent_update_result(config: &Config) -> Result<String, String> {
         &outcome.download_url,
         &outcome.backup,
     ))
+}
+
+#[derive(Clone, Debug)]
+struct AgentServiceRestartOutcome {
+    requested: bool,
+    message: String,
+}
+
+#[derive(Clone, Debug)]
+struct AgentServiceRestartRequest {
+    manager: &'static str,
+    program: &'static str,
+    args: Vec<&'static str>,
+    delayed_script: &'static str,
+}
+
+fn agent_service_restart_request(config: &Config) -> Option<AgentServiceRestartRequest> {
+    let mode = config.service_mode.trim();
+    let systemd_known = mode == "systemd"
+        || Path::new("/etc/systemd/system/pulsedeck-agent.service").is_file()
+        || Path::new("/lib/systemd/system/pulsedeck-agent.service").is_file()
+        || Path::new("/run/systemd/system").is_dir();
+    if command_exists("systemctl") && systemd_known {
+        return Some(AgentServiceRestartRequest {
+            manager: "systemd",
+            program: "systemctl",
+            args: vec!["restart", "pulsedeck-agent.service"],
+            delayed_script: "sleep 2; systemctl daemon-reload >/dev/null 2>&1; systemctl restart pulsedeck-agent.service >/dev/null 2>&1",
+        });
+    }
+
+    let openrc_known = mode == "openrc" || Path::new("/etc/init.d/pulsedeck-agent").is_file();
+    if command_exists("rc-service") && openrc_known {
+        return Some(AgentServiceRestartRequest {
+            manager: "OpenRC",
+            program: "rc-service",
+            args: vec!["pulsedeck-agent", "restart"],
+            delayed_script: "sleep 2; rc-service pulsedeck-agent restart >/dev/null 2>&1",
+        });
+    }
+
+    None
+}
+
+fn restart_agent_service_now(config: &Config) -> AgentServiceRestartOutcome {
+    let Some(request) = agent_service_restart_request(config) else {
+        return AgentServiceRestartOutcome {
+            requested: false,
+            message: "Agent 程序已替换；未检测到可自动重启的 systemd/OpenRC 服务，请运行 pk restart 或重启 Agent 进程。".to_string(),
+        };
+    };
+
+    if request.manager == "systemd" {
+        let _ = Command::new("systemctl").arg("daemon-reload").status();
+    }
+    match Command::new(request.program).args(&request.args).status() {
+        Ok(status) if status.success() => AgentServiceRestartOutcome {
+            requested: true,
+            message: format!("已通过 {} 重启 Agent 服务；面板将在下一次上报后显示新版本。", request.manager),
+        },
+        Ok(status) => AgentServiceRestartOutcome {
+            requested: false,
+            message: format!("Agent 程序已替换，但 {} 重启失败：{}。请运行 pk restart 或手动重启 Agent 服务。", request.manager, status),
+        },
+        Err(error) => AgentServiceRestartOutcome {
+            requested: false,
+            message: format!("Agent 程序已替换，但无法调用 {} 重启服务：{}。请运行 pk restart 或手动重启 Agent 服务。", request.manager, error),
+        },
+    }
+}
+
+fn schedule_agent_service_restart(config: &Config) -> AgentServiceRestartOutcome {
+    let Some(request) = agent_service_restart_request(config) else {
+        return AgentServiceRestartOutcome {
+            requested: false,
+            message: "Agent 程序已更新，未检测到可自动重启的 systemd/OpenRC 服务；请在节点上运行 pk restart 或重启 Agent 进程后生效。".to_string(),
+        };
+    };
+    if !command_exists("sh") {
+        return AgentServiceRestartOutcome {
+            requested: false,
+            message: format!("Agent 程序已更新，但无法安排 {} 延迟重启：未找到 sh。请在节点上运行 pk restart。", request.manager),
+        };
+    }
+    match Command::new("sh")
+        .args(["-c", request.delayed_script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(_) => AgentServiceRestartOutcome {
+            requested: true,
+            message: format!("Agent 程序已更新，已安排通过 {} 重启；面板将在下一次上报后显示新版本。", request.manager),
+        },
+        Err(error) => AgentServiceRestartOutcome {
+            requested: false,
+            message: format!("Agent 程序已更新，但安排 {} 重启失败：{}。请在节点上运行 pk restart。", request.manager, error),
+        },
+    }
 }
 
 fn agent_update_json(
@@ -2308,7 +2414,7 @@ fn protocol_tls_json(protocol: &NodeProtocol, secret: &str) -> Result<String, St
     }
     if security == "reality" {
         let private_key = protocol_setting(protocol, &["privateKey", "private_key", "realityPrivateKey"]).ok_or_else(|| {
-            format!("{} reality requires settings.privateKey generated by `sing-box generate reality-keypair`", protocol_display_name(&protocol.kind))
+            format!("{} Reality 缺少 settings.privateKey；请在面板重新保存或重新下发协议，面板会自动生成 Reality 密钥。", protocol_display_name(&protocol.kind))
         })?;
         let handshake_server = protocol_setting(protocol, &["handshakeServer", "handshake", "dest", "serverName"])
             .unwrap_or_else(|| "www.cloudflare.com".to_string());
