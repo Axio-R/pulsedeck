@@ -108,6 +108,21 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm build`: passed.
   - `git diff --check`: passed after cleaning generated router typing whitespace.
   - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine still has no `cargo`; `rustc --version` is also unavailable, so Rust compilation must be validated by GitHub Actions/GHCR.
+- Committed and pushed `e1a59ba Add agent update controls and subscription filters`, then superseded the initially published `v0.2.8` with compatibility patch commit `e9cbd12 Guard agent update controls for older agents`.
+- GitHub Actions and release:
+  - `main` panel image run `27090275024`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+  - Tag `v0.2.9`: panel image run `27090289403` completed successfully.
+  - Tag `v0.2.9`: Agent release run `27090289401` completed successfully and published release assets.
+  - Published Agent release assets: `pulsedeck-agent-v0.2.9-linux-x64.tar.gz` 420846 bytes, `pulsedeck-agent-v0.2.9-linux-arm64.tar.gz` 394307 bytes, `pulsedeck-agent-v0.2.9-linux-armv7l.tar.gz` 389311 bytes, and `SHA256SUMS` 323 bytes.
+- Deployment after `v0.2.9`:
+  - `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+  - `docker compose up -d`: recreated and started `pulsedeck-panel`.
+  - `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed with `version: 0.2.9` and `agentVersion: 0.2.9-rust`.
+  - `GET /api/v1/agents/runtime/manifest/linux-x64`: passed with `version: 0.2.9-rust`, `sizeBytes: 868928`, and SHA-256 `0431a31836e1f68cc51c91586a49a43df809dd6c8c594e85b87932514120bfdb`.
+- Post-deploy smoke passed:
+  - Created and deleted a temporary subscription node/Profile and verified the raw subscription link name was prefixed with `HK · Hong Kong`.
+  - Verified the real `hk` node shows region marker `HK`, current Agent `0.2.6-rust`, latest Agent `0.2.9-rust`, `updateAvailable: true`, and `remoteUpdateSupported: false` until it receives one local `pk update` bootstrap.
 
 - Implementation direction for this turn:
   - Fix the live node issues reported from a WARP IPv4 plus native IPv6 VPS.
