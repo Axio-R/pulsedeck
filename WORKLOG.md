@@ -104,6 +104,23 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm build`: passed.
   - `git diff --check`: passed.
   - `cargo check --manifest-path apps/agent/Cargo.toml`: could not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+- Committed and pushed `1b08145 Improve agent menu metrics and command feedback`.
+- GitHub Actions and release:
+  - Main panel image run `27085184792`: completed successfully and validated the Rust Agent Docker build.
+  - Tag `v0.2.3`: panel image run `27085250134` completed successfully.
+  - Tag `v0.2.3`: Agent release run `27085250130` completed successfully and published release assets.
+  - Published Agent release assets: `pulsedeck-agent-v0.2.3-linux-x64.tar.gz` 373143 bytes, `pulsedeck-agent-v0.2.3-linux-arm64.tar.gz` 349648 bytes, `pulsedeck-agent-v0.2.3-linux-armv7l.tar.gz` 344432 bytes, and `SHA256SUMS` 323 bytes.
+- Deployment after `v0.2.3`:
+  - `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+  - `docker compose up -d`: recreated and started `pulsedeck-panel`.
+  - `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed with `version: 0.2.3` and `agentVersion: 0.2.3-rust`.
+  - `GET /api/v1/agents/runtime/manifest/linux-x64`: passed with `version: 0.2.3-rust`, `sizeBytes: 770512`, and SHA-256 `432c7ab694e8eba0d586cbae55eb8b0c073da42f11ef40ecb3ab14cf57665241`.
+- Post-deploy smoke passed against the Compose deployment:
+  - Created a temporary smoke node and verified the install script includes `Use: pk, pk status`, runtime manifest lookup, and `verify_sha256`.
+  - Enrolled the smoke Agent, posted metrics with `cpu.usagePercent: 12.3`, and confirmed the node list exposes the CPU value.
+  - Confirmed nodes without a mounted GeoIP database display `GeoIP 未配置` instead of the ambiguous auto-detect text.
+  - Queued a failing `sing-box-apply` command and confirmed command events expose the actionable message `sing-box binary was not found; run sing-box-install or install sing-box manually`.
 
 - Implementation direction for this turn:
   - Continue remaining release/deployment work by making Agent runtime publishing observable and verifiable before cutting the next patch version.
