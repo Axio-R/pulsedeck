@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const VERSION: &str = "0.2.11-rust";
+const VERSION: &str = "0.2.12-rust";
 const DEFAULT_SING_BOX_VERSION: &str = "1.11.15";
 
 #[derive(Clone, Debug)]

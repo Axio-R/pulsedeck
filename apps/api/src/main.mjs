@@ -17,7 +17,7 @@ const DEFAULT_GEOIP_FILE = path.join(ROOT_DIR, 'geoip.json');
 const DEFAULT_GEOSITE_FILE = path.join(ROOT_DIR, 'geosite.json');
 const PORT = Number(process.env.PULSEDECK_PORT || 14770);
 const HOST = process.env.PULSEDECK_HOST || '0.0.0.0';
-const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.11';
+const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.12';
 const AGENT_VERSION = process.env.PULSEDECK_AGENT_VERSION || `${APP_VERSION}-rust`;
 const AGENT_RUNTIME_TARGETS = ['linux-x64', 'linux-arm64', 'linux-armv7l'];
 const ADMIN_USER = process.env.PULSEDECK_ADMIN_USER || 'admin';
@@ -26,6 +26,7 @@ const TRAFFIC_HISTORY_LIMIT = Math.max(Number(process.env.PULSEDECK_TRAFFIC_HIST
 const COMMAND_HISTORY_LIMIT = Math.max(Number(process.env.PULSEDECK_COMMAND_HISTORY_LIMIT) || 1000, 100);
 const COMMAND_EVENT_HISTORY_LIMIT = Math.max(Number(process.env.PULSEDECK_COMMAND_EVENT_HISTORY_LIMIT) || 10_000, 500);
 const COMMAND_RETENTION_DAYS = Math.max(Number(process.env.PULSEDECK_COMMAND_RETENTION_DAYS) || 30, 1);
+const COMMAND_RUNNING_TIMEOUT_SECONDS = Math.max(Number(process.env.PULSEDECK_COMMAND_RUNNING_TIMEOUT_SECONDS) || 15 * 60, 60);
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
@@ -185,7 +186,7 @@ function presentNode(node, req, data) {
     online: isNodeOnline(node, data),
     displayRegion: display,
     regionCode: nodeRegionCode(node),
-    regionIcon: nodeRegionCode(node) || 'AUTO',
+    regionIcon: regionFlag(nodeRegionCode(node)),
     agent: presentNodeAgent(node, data, req),
     installCommand: `curl -fsSL '${publicBaseUrl(req)}/api/v1/agents/install/${encodeURIComponent(node.installId)}' | sh`
   };
@@ -269,9 +270,7 @@ function nodeRegionCode(node) {
 }
 
 function firstRegionCode(input) {
-  const value = String(input || '').trim();
-  const match = /(?:^|\b)([A-Z]{2})(?:\b|$)/.exec(value);
-  return match ? match[1] : '';
+  return regionCodeFromText(input);
 }
 
 function agentNodeSnapshot(node) {
@@ -613,7 +612,76 @@ function isPublicLookupAddress(item) {
   return /^public-lookup/i.test(item.interface || '') || /^agent-public/i.test(item.source || '');
 }
 
+const REGION_NAME_TO_CODE = new Map(
+  Object.entries({
+    'hong kong': 'HK',
+    hongkong: 'HK',
+    '香港': 'HK',
+    singapore: 'SG',
+    '新加坡': 'SG',
+    japan: 'JP',
+    tokyo: 'JP',
+    osaka: 'JP',
+    '日本': 'JP',
+    '东京': 'JP',
+    '大阪': 'JP',
+    'united states': 'US',
+    usa: 'US',
+    california: 'US',
+    'los angeles': 'US',
+    '美国': 'US',
+    '洛杉矶': 'US',
+    taiwan: 'TW',
+    'taipei': 'TW',
+    '台湾': 'TW',
+    '台北': 'TW',
+    korea: 'KR',
+    'south korea': 'KR',
+    seoul: 'KR',
+    '韩国': 'KR',
+    '首尔': 'KR',
+    germany: 'DE',
+    frankfurt: 'DE',
+    '德国': 'DE',
+    '法兰克福': 'DE',
+    'united kingdom': 'GB',
+    uk: 'GB',
+    london: 'GB',
+    '英国': 'GB',
+    '伦敦': 'GB',
+    france: 'FR',
+    paris: 'FR',
+    '法国': 'FR',
+    '巴黎': 'FR',
+    netherlands: 'NL',
+    amsterdam: 'NL',
+    '荷兰': 'NL',
+    canada: 'CA',
+    '加拿大': 'CA',
+    australia: 'AU',
+    sydney: 'AU',
+    '澳大利亚': 'AU',
+    russia: 'RU',
+    '俄罗斯': 'RU',
+    india: 'IN',
+    '印度': 'IN',
+    thailand: 'TH',
+    bangkok: 'TH',
+    '泰国': 'TH',
+    vietnam: 'VN',
+    '越南': 'VN',
+    malaysia: 'MY',
+    '马来西亚': 'MY',
+    indonesia: 'ID',
+    '印度尼西亚': 'ID',
+    philippines: 'PH',
+    '菲律宾': 'PH'
+  })
+);
+
 function compactRegionLabel(...parts) {
+  const code = parts.flatMap((item) => String(item || '').split(/\s*·\s*/)).map(regionCodeFromText).find(Boolean);
+  if (code) return code;
   const values = [];
   for (const part of parts.flatMap((item) => String(item || '').split(/\s*·\s*/))) {
     const value = part.trim();
@@ -623,6 +691,21 @@ function compactRegionLabel(...parts) {
     values.push({ value, normalized });
   }
   return values.map((item) => item.value).join(' · ');
+}
+
+function regionCodeFromText(input) {
+  const value = String(input || '').trim();
+  if (!value) return '';
+  const match = /(?:^|\b)([A-Z]{2})(?:\b|$)/.exec(value.toUpperCase());
+  if (match) return match[1];
+  const normalized = value.toLowerCase().replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return REGION_NAME_TO_CODE.get(normalized) || '';
+}
+
+function regionFlag(code) {
+  const normalized = String(code || '').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(normalized)) return '🌐';
+  return [...normalized].map((char) => String.fromCodePoint(char.charCodeAt(0) + 127397)).join('');
 }
 
 function normalizeStringList(input) {
@@ -1363,7 +1446,10 @@ function profileMatchesNode(profile, node) {
   if (filters.nodeIds.length && !filters.nodeIds.includes(node.id)) return false;
   if (filters.groups.length && !filters.groups.includes(node.group || '未分组')) return false;
   const region = compactRegionLabel(node.region || node.network?.detectedRegion || '');
-  if (filters.regions.length && !filters.regions.some((item) => region.includes(item) || item.includes(region))) return false;
+  if (filters.regions.length && (!region || !filters.regions.some((item) => {
+    const filterRegion = compactRegionLabel(item);
+    return filterRegion === region || region.includes(filterRegion) || filterRegion.includes(region);
+  }))) return false;
   if (filters.tags.length) {
     const nodeTags = new Set(Array.isArray(node.tags) ? node.tags : []);
     if (!filters.tags.some((tag) => nodeTags.has(tag))) return false;
@@ -1481,6 +1567,45 @@ function commandEvents(data, commandId) {
 function commandTimeValue(command) {
   const parsed = Date.parse(command.updatedAt || command.createdAt || '');
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function expireStaleRunningCommands(draft, nowMs = Date.now()) {
+  draft.commands ||= [];
+  const cutoff = nowMs - COMMAND_RUNNING_TIMEOUT_SECONDS * 1000;
+  let expired = 0;
+  for (const command of draft.commands) {
+    if (command.status !== 'running') continue;
+    const lastUpdated = commandTimeValue(command);
+    if (!lastUpdated || lastUpdated >= cutoff) continue;
+    const timestamp = nowIso();
+    command.status = 'failed';
+    command.updatedAt = timestamp;
+    command.result = {
+      message: `命令执行超过 ${Math.round(COMMAND_RUNNING_TIMEOUT_SECONDS / 60)} 分钟未返回结果，已自动标记为失败；Agent 可能在执行时断开或重启。`,
+      expired: true,
+      timeoutSeconds: COMMAND_RUNNING_TIMEOUT_SECONDS,
+      previousStatus: 'running'
+    };
+    appendCommandEvent(draft, command, {
+      type: 'error',
+      stream: 'state',
+      message: command.result.message,
+      payload: { status: 'failed', expired: true, timeoutSeconds: COMMAND_RUNNING_TIMEOUT_SECONDS },
+      createdAt: timestamp
+    });
+    expired += 1;
+  }
+  return expired;
+}
+
+function hasStaleRunningCommands(data, nowMs = Date.now()) {
+  const cutoff = nowMs - COMMAND_RUNNING_TIMEOUT_SECONDS * 1000;
+  return (data.commands || []).some((command) => command.status === 'running' && commandTimeValue(command) > 0 && commandTimeValue(command) < cutoff);
+}
+
+async function expireStaleRunningCommandsIfNeeded(store) {
+  if (!hasStaleRunningCommands(store.data)) return 0;
+  return store.update((draft) => expireStaleRunningCommands(draft));
 }
 
 function eventTimeValue(event) {
@@ -2059,7 +2184,7 @@ function mimeType(file) {
 }
 
 async function handleApi(req, res, store, url, realtime = {}) {
-  const data = store.data;
+  let data = store.data;
   const method = req.method || 'GET';
   const segments = url.pathname.split('/').filter(Boolean);
 
@@ -2356,6 +2481,8 @@ async function handleApi(req, res, store, url, realtime = {}) {
   if (!session) return forbidden(res, 'authentication required');
 
   if (method === 'GET' && url.pathname === '/api/v1/dashboard') {
+    await expireStaleRunningCommandsIfNeeded(store);
+    data = store.data;
     return sendJson(res, 200, dashboard(data));
   }
 
@@ -2599,10 +2726,16 @@ async function handleApi(req, res, store, url, realtime = {}) {
   }
 
   if (method === 'GET' && url.pathname === '/api/v1/commands') {
+    await expireStaleRunningCommandsIfNeeded(store);
+    data = store.data;
+    const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 200, 1), 1000);
+    const status = String(url.searchParams.get('status') || '').trim();
     return sendJson(res, 200, {
       items: data.commands
         .slice()
         .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
+        .filter((command) => !status || command.status === status)
+        .slice(0, limit)
     });
   }
 
@@ -2781,6 +2914,7 @@ export async function createPulseDeckServer(options = {}) {
   const store = options.store || new JsonStore(options.dataFile);
   await store.load();
   await store.update((draft) => {
+    expireStaleRunningCommands(draft);
     pruneCommandHistory(draft);
   });
   const trafficHub = createTrafficHub(store);

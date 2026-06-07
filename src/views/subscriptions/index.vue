@@ -9,6 +9,7 @@ import {
   type PulseNode,
   type PulseProfile
 } from '@/service/api';
+import { compactRegion, regionBadge } from '@/utils/pulse-format';
 
 const loading = ref(false);
 const profiles = ref<PulseProfile[]>([]);
@@ -38,7 +39,12 @@ const profileDrafts = reactive<
 
 const nodeOptions = computed(() => nodes.value.map(node => ({ label: node.name, value: node.id })));
 const groupOptions = computed(() => uniqueOptions(nodes.value.map(node => node.group || '未分组')));
-const regionOptions = computed(() => uniqueOptions(nodes.value.map(node => node.displayRegion || node.region).filter(Boolean)));
+const regionOptions = computed(() => {
+  const regions = nodes.value.map(node => compactRegion(node.displayRegion || node.region)).filter(Boolean);
+  return [...new Set(regions)]
+    .sort((a, b) => a.localeCompare(b))
+    .map(value => ({ label: regionBadge(value), value }));
+});
 const tagOptions = computed(() => uniqueOptions(nodes.value.flatMap(node => node.tags || [])));
 
 function uniqueOptions(values: string[]) {

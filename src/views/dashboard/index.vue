@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { fetchPulseDashboard, openPulseTrafficSocket, type PulseDashboard, type PulseTrafficEvent } from '@/service/api';
-import { formatBeijingTime, formatBytes, formatRate } from '@/utils/pulse-format';
+import { formatBeijingTime, formatBytes, formatRate, regionBadge } from '@/utils/pulse-format';
 
 type TrafficSocketState = 'connecting' | 'live' | 'reconnecting' | 'offline';
 type TrafficSample = { time: number; rx: number; tx: number; totalRx: number; totalTx: number; total: number };
@@ -102,7 +102,7 @@ function applyTrafficEvent(event: PulseTrafficEvent) {
 }
 
 function displayRegion(node: PulseDashboard['recentNodes'][number]) {
-  return node.displayRegion || node.region || '等待 Agent 上报';
+  return regionBadge(node.displayRegion || node.region || node.network?.detectedRegion || '', node.regionIcon);
 }
 
 function commandLabel(type: string) {

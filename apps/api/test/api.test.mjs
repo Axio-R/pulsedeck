@@ -96,8 +96,8 @@ test('health reports PulseDeck on default product port', async () => {
     const { res, body } = await request(app.base, '/api/v1/health');
     assert.equal(res.status, 200);
     assert.equal(body.name, 'PulseDeck');
-    assert.equal(body.version, '0.2.11');
-    assert.equal(body.agentVersion, '0.2.11-rust');
+    assert.equal(body.version, '0.2.12');
+    assert.equal(body.agentVersion, '0.2.12-rust');
     assert.equal(body.port, 14770);
   } finally {
     await app.close();
@@ -109,7 +109,7 @@ test('agent runtime manifest exposes target metadata', async () => {
   try {
     const { res, body } = await request(app.base, '/api/v1/agents/runtime/manifest');
     assert.equal(res.status, 200);
-    assert.equal(body.agentVersion, '0.2.11-rust');
+    assert.equal(body.agentVersion, '0.2.12-rust');
     assert.ok(Array.isArray(body.targets));
     assert.deepEqual(
       body.targets.map((target) => target.target),
@@ -124,7 +124,7 @@ test('agent runtime manifest exposes target metadata', async () => {
     const single = await request(app.base, '/api/v1/agents/runtime/manifest/linux-x64');
     assert.equal(single.res.status, 200);
     assert.equal(single.body.target, 'linux-x64');
-    assert.equal(single.body.version, '0.2.11-rust');
+    assert.equal(single.body.version, '0.2.12-rust');
   } finally {
     await app.close();
   }
@@ -239,7 +239,8 @@ test('geoip and geosite lookup use local database files', async () => {
     });
     const nodes = await request(app.base, '/api/v1/nodes', { headers: auth });
     const discovered = nodes.body.items.find((node) => node.id === created.body.id);
-    assert.equal(discovered.region, 'Tokyo');
+    assert.equal(discovered.region, 'JP');
+    assert.equal(discovered.regionIcon, '🇯🇵');
     assert.match(discovered.network.regionSource, /geoip-file/);
   } finally {
     if (previousGeoip === undefined) delete process.env.PULSEDECK_GEOIP_FILE;
@@ -315,8 +316,8 @@ test('command history pruning keeps active commands and caps completed history',
       payload: {},
       status: index === 0 ? 'queued' : 'running',
       result: null,
-      createdAt: timestamp,
-      updatedAt: timestamp
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     }))
   ];
   const commandEvents = commands.map((command, index) => ({
@@ -350,18 +351,82 @@ test('command history pruning keeps active commands and caps completed history',
       body: { username: 'admin', password: 'change-me' }
     });
     const auth = { authorization: `Bearer ${login.body.token}` };
-    const listed = await request(app.base, '/api/v1/commands', { headers: auth });
+    const listed = await request(app.base, '/api/v1/commands?limit=1000', { headers: auth });
     assert.equal(listed.res.status, 200);
-    assert.equal(listed.body.items.filter((item) => item.status === 'succeeded').length, 1000);
     assert.equal(listed.body.items.filter((item) => ['queued', 'running'].includes(item.status)).length, 2);
+
+    const completedListed = await request(app.base, '/api/v1/commands?status=succeeded&limit=1000', { headers: auth });
+    assert.equal(completedListed.res.status, 200);
+    assert.equal(completedListed.body.items.length, 1000);
+    assert.equal(completedListed.body.items.every((item) => item.status === 'succeeded'), true);
     assert.equal(listed.body.items.some((item) => item.id === 'done-0'), false);
-    assert.equal(listed.body.items.some((item) => item.id === 'done-1004'), true);
+    assert.equal(completedListed.body.items.some((item) => item.id === 'done-1004'), true);
 
     const prunedEvents = await request(app.base, '/api/v1/commands/done-0/events?format=json', { headers: auth });
     assert.equal(prunedEvents.res.status, 404);
     const activeEvents = await request(app.base, '/api/v1/commands/active-0/events?format=json', { headers: auth });
     assert.equal(activeEvents.res.status, 200);
     assert.equal(activeEvents.body.items.length, 1);
+  } finally {
+    await app.close();
+  }
+});
+
+test('stale running commands are expired with a clear result', async () => {
+  const oldTimestamp = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const command = {
+    id: 'stale-running-command',
+    nodeId: 'node-stale',
+    agentId: 'agent-stale',
+    type: 'reset-links',
+    payload: {},
+    status: 'running',
+    result: null,
+    createdAt: oldTimestamp,
+    updatedAt: oldTimestamp
+  };
+  const app = await startServer({
+    version: 1,
+    createdAt: oldTimestamp,
+    updatedAt: oldTimestamp,
+    sessions: [],
+    nodes: [],
+    agents: [],
+    commands: [command],
+    commandEvents: [
+      {
+        id: 'event-stale-running',
+        commandId: command.id,
+        nodeId: command.nodeId,
+        agentId: command.agentId,
+        type: 'state',
+        stream: 'state',
+        message: '执行中 reset-links',
+        payload: { status: 'running' },
+        sequence: 1,
+        createdAt: oldTimestamp
+      }
+    ],
+    alertEvents: [],
+    trafficHistory: [],
+    subscriptionProfiles: []
+  });
+  try {
+    const login = await request(app.base, '/api/v1/auth/login', {
+      method: 'POST',
+      body: { username: 'admin', password: 'change-me' }
+    });
+    const auth = { authorization: `Bearer ${login.body.token}` };
+    const listed = await request(app.base, '/api/v1/commands', { headers: auth });
+    assert.equal(listed.res.status, 200);
+    const expired = listed.body.items.find((item) => item.id === command.id);
+    assert.equal(expired.status, 'failed');
+    assert.equal(expired.result.expired, true);
+    assert.match(expired.result.message, /自动标记为失败/);
+
+    const events = await request(app.base, `/api/v1/commands/${command.id}/events?format=json`, { headers: auth });
+    assert.equal(events.res.status, 200);
+    assert.ok(events.body.items.some((event) => event.payload?.expired === true));
   } finally {
     await app.close();
   }
@@ -415,7 +480,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.equal(discovered.displayRegion, 'GeoIP 未配置');
     assert.equal(discovered.agent.version, '0.1.0-rust');
     assert.equal(discovered.agent.target, 'linux-x64');
-    assert.equal(discovered.agent.latestVersion, '0.2.11-rust');
+    assert.equal(discovered.agent.latestVersion, '0.2.12-rust');
     assert.equal(discovered.agent.updateAvailable, true);
     assert.equal(discovered.agent.remoteUpdateSupported, false);
 
@@ -448,8 +513,9 @@ test('nodes support automatic network discovery, protocol commands, and link res
     });
     const listedWithAgentGeo = await request(app.base, '/api/v1/nodes', { headers: auth });
     const agentGeoDiscovered = listedWithAgentGeo.body.items.find((node) => node.id === agentGeoNode.body.id);
-    assert.equal(agentGeoDiscovered.region, 'US · California · Los Angeles');
-    assert.equal(agentGeoDiscovered.displayRegion, 'US · California · Los Angeles');
+    assert.equal(agentGeoDiscovered.region, 'US');
+    assert.equal(agentGeoDiscovered.displayRegion, 'US');
+    assert.equal(agentGeoDiscovered.regionIcon, '🇺🇸');
     assert.equal(agentGeoDiscovered.network.regionSource, 'agent-public-lookup');
 
     const warpNode = await request(app.base, '/api/v1/nodes', {
@@ -460,7 +526,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     await request(app.base, `/api/v1/agents/enroll/${warpNode.body.installId}`, {
       method: 'POST',
       body: {
-        version: '0.2.11-rust',
+        version: '0.2.12-rust',
         platform: 'linux',
         arch: 'x86_64',
         installDir: '/var/lib/pulsedeck',
@@ -485,8 +551,9 @@ test('nodes support automatic network discovery, protocol commands, and link res
     });
     const listedWarp = await request(app.base, '/api/v1/nodes', { headers: auth });
     const warpDiscovered = listedWarp.body.items.find((node) => node.id === warpNode.body.id);
-    assert.equal(warpDiscovered.region, 'HK · Hong Kong');
-    assert.equal(warpDiscovered.displayRegion, 'HK · Hong Kong');
+    assert.equal(warpDiscovered.region, 'HK');
+    assert.equal(warpDiscovered.displayRegion, 'HK');
+    assert.equal(warpDiscovered.regionIcon, '🇭🇰');
     assert.equal(warpDiscovered.network.ipMode, 'warp-v4-ipv6');
     assert.equal(warpDiscovered.network.primaryIpv4, null);
     assert.equal(warpDiscovered.network.primaryIpv6, '2001:4860:4860::8888');
@@ -599,7 +666,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
               status: 'update-available',
               target: 'linux-x64',
               currentVersion: '0.1.0-rust',
-              latestVersion: '0.2.11-rust',
+              latestVersion: '0.2.12-rust',
               available: true,
               updateAvailable: true
             }
@@ -612,7 +679,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     const withAgentUpdate = listedAfterAgentCheck.body.items.find((node) => node.id === created.body.id);
     assert.equal(withAgentUpdate.agent.update.status, 'update-available');
     assert.equal(withAgentUpdate.agent.update.updateAvailable, true);
-    assert.equal(withAgentUpdate.agent.update.latestVersion, '0.2.11-rust');
+    assert.equal(withAgentUpdate.agent.update.latestVersion, '0.2.12-rust');
 
     const eventsAfterResult = await request(app.base, `/api/v1/commands/${protocolCommand.id}/events?format=json`, { headers: auth });
     assert.ok(eventsAfterResult.body.items.some((event) => event.type === 'result'));
@@ -1186,7 +1253,7 @@ test('subscription profiles protect defaults and delete custom profiles', async 
     });
     const hkAgent = await request(app.base, `/api/v1/agents/enroll/${hkNode.body.installId}`, {
       method: 'POST',
-      body: { version: '0.2.11-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
+      body: { version: '0.2.12-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
     });
     await request(app.base, `/api/v1/agents/${hkAgent.body.agentId}/metrics`, {
       method: 'POST',
@@ -1200,7 +1267,7 @@ test('subscription profiles protect defaults and delete custom profiles', async 
     });
     const usAgent = await request(app.base, `/api/v1/agents/enroll/${usNode.body.installId}`, {
       method: 'POST',
-      body: { version: '0.2.11-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
+      body: { version: '0.2.12-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
     });
     await request(app.base, `/api/v1/agents/${usAgent.body.agentId}/metrics`, {
       method: 'POST',
@@ -1220,7 +1287,7 @@ test('subscription profiles protect defaults and delete custom profiles', async 
     const sub = await request(app.base, `/sub/${filtered.body.token}`);
     assert.equal(sub.res.status, 200);
     const decodedSub = decodeURIComponent(sub.body);
-    assert.ok(decodedSub.includes('HK · Hong Kong hk-node'));
+    assert.ok(decodedSub.includes('HK hk-node'));
     assert.equal(decodedSub.includes('us-node'), false);
 
     const deleted = await request(app.base, `/api/v1/subscription-profiles/${custom.body.id}`, {

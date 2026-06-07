@@ -83,6 +83,29 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 
 ## Log
 
+### 2026-06-07 (`v0.2.12`)
+
+- Implementation direction for `v0.2.12`:
+  - Tighten the node management UI further so node cards are smaller and can fit three to four per row on common desktop widths.
+  - Normalize region display across the panel to flag plus short region code, avoiding duplicated labels such as `HKHK · Hong Kong`.
+  - Improve page loading performance by reducing default command/traffic payloads and letting node data render before secondary traffic analytics.
+  - Fix stale command queue entries that remain in `running` indefinitely when an Agent disconnects or restarts mid-command.
+- Implementation completed before commit:
+  - Added API and frontend region normalization for common country/region names, with `displayRegion` reduced to codes such as `HK`/`SG` and `regionIcon` rendered as a flag.
+  - Updated subscription region filtering and prefixing to use normalized short region codes while remaining compatible with old long region filters.
+  - Added stale `running` command expiration with a default 15-minute timeout, failed-result message, and command event.
+  - Added `/api/v1/commands?limit=&status=` support and made the command page load the latest 200 commands by default.
+  - Reworked node cards into a denser four-action layout: install, protocols, settings, and more; protocol lists and traffic policy forms now live in popovers.
+  - Made node page primary data load independently from traffic analytics and reduced default traffic rank/history samples.
+- Local verification before commit:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 16 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `git diff --check`: passed after cleaning generated router typing whitespace.
+  - Local API smoke on port `6292`: passed; an hour-old `running` command was automatically marked `failed` with an explicit 15-minute timeout message.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+
 ### 2026-06-07 (`v0.2.11`)
 
 - Implementation direction for `v0.2.11`:

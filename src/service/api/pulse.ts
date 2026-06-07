@@ -448,8 +448,12 @@ export function queuePulseCommand(nodeId: string, type: string, payload: Record<
   return pulseFetch<PulseCommand>(`/nodes/${nodeId}/commands`, { method: 'POST', body: { type, payload } });
 }
 
-export function fetchPulseCommands() {
-  return pulseFetch<{ items: PulseCommand[] }>('/commands');
+export function fetchPulseCommands(limit = 200, status = '') {
+  const search = new URLSearchParams();
+  if (limit) search.set('limit', String(limit));
+  if (status) search.set('status', status);
+  const query = search.toString();
+  return pulseFetch<{ items: PulseCommand[] }>(`/commands${query ? `?${query}` : ''}`);
 }
 
 export function fetchPulseCommandEvents(commandId: string) {

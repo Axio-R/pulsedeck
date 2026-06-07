@@ -43,3 +43,95 @@ export function formatBytes(value?: number | null) {
 export function formatRate(value?: number | null) {
   return `${formatBytes(value)}/s`;
 }
+
+const regionNameToCode: Record<string, string> = {
+  'hong kong': 'HK',
+  hongkong: 'HK',
+  香港: 'HK',
+  singapore: 'SG',
+  新加坡: 'SG',
+  japan: 'JP',
+  tokyo: 'JP',
+  osaka: 'JP',
+  日本: 'JP',
+  东京: 'JP',
+  大阪: 'JP',
+  'united states': 'US',
+  usa: 'US',
+  california: 'US',
+  'los angeles': 'US',
+  美国: 'US',
+  洛杉矶: 'US',
+  taiwan: 'TW',
+  taipei: 'TW',
+  台湾: 'TW',
+  台北: 'TW',
+  korea: 'KR',
+  'south korea': 'KR',
+  seoul: 'KR',
+  韩国: 'KR',
+  首尔: 'KR',
+  germany: 'DE',
+  frankfurt: 'DE',
+  德国: 'DE',
+  法兰克福: 'DE',
+  'united kingdom': 'GB',
+  uk: 'GB',
+  london: 'GB',
+  英国: 'GB',
+  伦敦: 'GB',
+  france: 'FR',
+  paris: 'FR',
+  法国: 'FR',
+  巴黎: 'FR',
+  netherlands: 'NL',
+  amsterdam: 'NL',
+  荷兰: 'NL',
+  canada: 'CA',
+  加拿大: 'CA',
+  australia: 'AU',
+  sydney: 'AU',
+  澳大利亚: 'AU',
+  russia: 'RU',
+  俄罗斯: 'RU',
+  india: 'IN',
+  印度: 'IN',
+  thailand: 'TH',
+  bangkok: 'TH',
+  泰国: 'TH',
+  vietnam: 'VN',
+  越南: 'VN',
+  malaysia: 'MY',
+  马来西亚: 'MY',
+  indonesia: 'ID',
+  印度尼西亚: 'ID',
+  philippines: 'PH',
+  菲律宾: 'PH'
+};
+
+export function regionCode(value?: string | null) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const match = /(?:^|\b)([A-Z]{2})(?:\b|$)/.exec(raw.toUpperCase());
+  if (match) return match[1];
+  const normalized = raw.toLowerCase().replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return regionNameToCode[normalized] || '';
+}
+
+export function regionFlag(code?: string | null) {
+  const normalized = regionCode(code) || String(code || '').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(normalized)) return '🌐';
+  return [...normalized].map(char => String.fromCodePoint(char.charCodeAt(0) + 127397)).join('');
+}
+
+export function compactRegion(value?: string | null) {
+  const code = regionCode(value);
+  if (code) return code;
+  return String(value || '').split(/\s*·\s*/).map(item => item.trim()).filter(Boolean)[0] || 'AUTO';
+}
+
+export function regionBadge(value?: string | null, icon?: string | null) {
+  const code = compactRegion(value);
+  const flag = icon && icon !== 'AUTO' ? icon : regionFlag(code);
+  return `${flag} ${code}`;
+}

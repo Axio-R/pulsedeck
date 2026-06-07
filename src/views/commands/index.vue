@@ -11,6 +11,8 @@ const commandEvents = ref<PulseCommandEvent[]>([]);
 const drawerVisible = ref(false);
 let eventSource: EventSource | null = null;
 
+const activeCommandCount = computed(() => commands.value.filter(command => ['queued', 'running'].includes(command.status)).length);
+
 const columns = computed(() => [
   {
     title: '命令',
@@ -126,8 +128,17 @@ function resultMessage(result: unknown): string {
 
 function commandResultSummary(command: PulseCommand) {
   if (command.status === 'queued') return '等待 Agent 拉取';
-  if (command.status === 'running') return 'Agent 正在执行';
+  if (command.status === 'running') return `Agent 正在执行 · ${commandAgeLabel(command.updatedAt)}`;
   return resultMessage(command.result) || (command.status === 'succeeded' ? '已完成' : '无结果详情');
+}
+
+function commandAgeLabel(value: string) {
+  const updated = Date.parse(value || '');
+  if (!Number.isFinite(updated)) return '更新时间未知';
+  const minutes = Math.max(0, Math.round((Date.now() - updated) / 60_000));
+  if (minutes < 1) return '刚刚更新';
+  if (minutes < 60) return `${minutes} 分钟未更新`;
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟未更新`;
 }
 
 function shortId(id: string) {
@@ -138,7 +149,7 @@ function shortId(id: string) {
 async function loadData() {
   loading.value = true;
   try {
-    commands.value = (await fetchPulseCommands()).items;
+    commands.value = (await fetchPulseCommands(200)).items;
   } finally {
     loading.value = false;
   }
@@ -188,7 +199,10 @@ onBeforeUnmount(closeEventSource);
   <NSpace vertical :size="16">
     <NCard title="Agent 命令队列" :bordered="false" class="card-wrapper">
       <template #header-extra>
-        <NButton size="small" :loading="loading" @click="loadData">刷新</NButton>
+        <NSpace :size="8" align="center">
+          <NTag v-if="activeCommandCount" size="small" type="warning" :bordered="false">活动 {{ activeCommandCount }}</NTag>
+          <NButton size="small" :loading="loading" @click="loadData">刷新</NButton>
+        </NSpace>
       </template>
       <NDataTable :columns="columns" :data="commands" :loading="loading" :bordered="false" />
     </NCard>

@@ -24,7 +24,7 @@ import {
   type PulseTrafficHistoryItem,
   type PulseTrafficRankItem
 } from '@/service/api';
-import { formatBeijingTime, formatBytes, formatRate } from '@/utils/pulse-format';
+import { compactRegion, formatBeijingTime, formatBytes, formatRate, regionBadge, regionFlag } from '@/utils/pulse-format';
 
 type ProtocolDraft = { type: string; port: number | null; listen: string; variant: string; settingsJson: string };
 type TrafficDraft = {
@@ -197,7 +197,7 @@ async function loadData() {
       draftFor(node);
       trafficDraftFor(node);
     }
-    await loadTrafficAnalytics();
+    void loadTrafficAnalytics().catch(() => {});
   } finally {
     loading.value = false;
   }
@@ -290,6 +290,7 @@ function nodeMoreActionOptions(node: PulseNode) {
     { label: '探测节点', key: 'probe' },
     { label: '诊断节点', key: 'diagnostics' },
     { label: '渲染配置', key: 'sing-box-render' },
+    { label: '应用配置', key: 'sing-box-apply' },
     { type: 'divider', key: 'divider-agent' },
     { label: '检查 Agent 更新', key: 'agent-update-check', disabled: !canRemoteUpdateAgent(node) },
     { label: '更新 Agent', key: 'agent-update', disabled: !canRemoteUpdateAgent(node) },
@@ -531,15 +532,15 @@ function ipModeLabel(value?: string) {
 }
 
 function displayNodeRegion(node: PulseNode) {
-  return node.displayRegion || node.region || '等待 Agent 上报';
+  return compactRegion(node.displayRegion || node.region || node.network?.detectedRegion || '');
 }
 
 function regionIconLabel(node: PulseNode) {
-  const value = String(node.regionIcon || node.regionCode || '').trim().toUpperCase();
-  if (/^[A-Z]{2}$/.test(value)) return value;
-  const region = displayNodeRegion(node);
-  const match = /(?:^|\b)([A-Z]{2})(?:\b|$)/.exec(region);
-  return match?.[1] || 'AUTO';
+  return node.regionIcon && node.regionIcon !== 'AUTO' ? node.regionIcon : regionFlag(displayNodeRegion(node));
+}
+
+function regionBadgeLabel(node: PulseNode) {
+  return regionBadge(displayNodeRegion(node), regionIconLabel(node));
 }
 
 function agentVersionLabel(node: PulseNode) {
@@ -691,8 +692,8 @@ function resetModeOptions() {
 
 async function loadTrafficAnalytics() {
   const [rankRes, historyRes] = await Promise.all([
-    fetchPulseTrafficRank(rankMode.value, 20),
-    fetchPulseTrafficHistory({ nodeId: historyNodeId.value || undefined, limit: 240 })
+    fetchPulseTrafficRank(rankMode.value, 12),
+    fetchPulseTrafficHistory({ nodeId: historyNodeId.value || undefined, limit: 120 })
   ]);
   trafficRank.value = rankRes.items;
   persistedTrafficHistory.value = historyRes.items.slice().reverse();
@@ -930,8 +931,8 @@ onUnmounted(() => {
       </NGi>
     </NGrid>
 
-    <NGrid :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
-      <NGi v-for="node in visibleNodes" :key="node.id" span="24 m:12 xl:8 2xl:6">
+    <NGrid :x-gap="10" :y-gap="10" responsive="screen" item-responsive>
+      <NGi v-for="node in visibleNodes" :key="node.id" span="24 s:12 l:8 xl:6">
         <NCard :bordered="false" class="card-wrapper node-card">
           <div class="node-head">
             <div class="node-title-block">
@@ -939,16 +940,20 @@ onUnmounted(() => {
                 <span class="region-icon">{{ regionIconLabel(node) }}</span>
                 <div class="node-title">{{ node.name }}</div>
               </div>
-              <div class="node-subtitle">
-                {{ displayNodeRegion(node) }} · {{ ipModeLabel(node.network?.ipMode) }}
-              </div>
+              <div class="node-subtitle">{{ displayNodeRegion(node) }} · {{ ipModeLabel(node.network?.ipMode) }}</div>
             </div>
             <NTag :type="node.online ? 'success' : 'warning'" size="small" round>{{ node.online ? '在线' : node.agentStatus }}</NTag>
           </div>
 
+          <div class="node-quickline">
+            <span>{{ regionBadgeLabel(node) }}</span>
+            <span>协议 {{ node.protocols?.length || 0 }}</span>
+            <span>上报 {{ formatBeijingTime(node.lastSeenAt) }}</span>
+          </div>
+
           <div class="ip-strip">
             <div
-              v-for="item in nodeIpRows(node)"
+              v-for="item in nodeIpRows(node).filter(row => row.value !== '-')"
               :key="item.label"
               class="ip-pill"
               :class="`ip-pill-${item.tone}`"
@@ -977,16 +982,8 @@ onUnmounted(() => {
               <strong>↓ {{ formatBytes(node.traffic?.totalRxBytes) }} · ↑ {{ formatBytes(node.traffic?.totalTxBytes) }}</strong>
             </div>
             <div class="metric-item">
-              <span>总量 / 策略</span>
-              <strong>{{ formatBytes(node.traffic?.totalBytes) }} · {{ trafficUsageLabel(node) }}</strong>
-            </div>
-            <div class="metric-item">
               <span>Agent</span>
               <strong>{{ agentVersionLabel(node) }} · {{ agentUpdateLabel(node) }}</strong>
-            </div>
-            <div class="metric-item">
-              <span>最后上报</span>
-              <strong>{{ formatBeijingTime(node.lastSeenAt) }}</strong>
             </div>
           </div>
 
@@ -994,47 +991,43 @@ onUnmounted(() => {
             <div class="traffic-limit-bar">
               <span :style="{ width: `${trafficUsagePercent(node)}%` }" />
             </div>
-            <span>{{ node.subscriptionEnabled ? '订阅启用' : '订阅停用' }}</span>
+            <span>{{ trafficUsageLabel(node) }} · {{ node.subscriptionEnabled ? '订阅启用' : '订阅停用' }}</span>
           </div>
-
-          <NDivider class="my-8px" />
-
-          <div class="section-head">
-            <NText strong>协议</NText>
-            <NText depth="3">{{ node.protocols?.length || 0 }} 个 · sing-box {{ node.singBox?.installed ? '已安装' : '未安装' }}</NText>
-          </div>
-          <div v-if="node.protocols?.length" class="protocol-list">
-            <div v-for="protocol in node.protocols" :key="protocol.id" class="protocol-row">
-              <div class="protocol-main">
-                <div class="protocol-name">
-                  {{ protocol.name }}
-                  <span>{{ protocolMode(protocol) }}</span>
-                </div>
-                <NSpace :size="6" class="protocol-badges">
-                  <NTag v-for="badge in protocolBadges(protocol)" :key="badge" size="small" :bordered="false">
-                    {{ badge }}
-                  </NTag>
-                </NSpace>
-              </div>
-              <NPopconfirm @positive-click="removeProtocol(node, protocol.id)">
-                <template #trigger>
-                  <NButton size="tiny" secondary type="error">删除</NButton>
-                </template>
-                删除 {{ protocol.name }} :{{ protocol.port }} 并推送远程配置？
-              </NPopconfirm>
-            </div>
-          </div>
-          <NEmpty v-else size="small" description="暂无协议" />
-
-          <NDivider class="my-8px" />
 
           <div class="node-actions">
-            <NButton size="small" @click="openInstallDrawer(node)">安装命令</NButton>
+            <NButton size="small" @click="openInstallDrawer(node)">安装</NButton>
             <NPopover trigger="click" placement="top-start">
               <template #trigger>
-                <NButton size="small" secondary>添加协议</NButton>
+                <NButton size="small" secondary>协议</NButton>
               </template>
               <NSpace vertical :size="8" class="protocol-popover">
+                <div class="section-head">
+                  <NText strong>协议</NText>
+                  <NText depth="3">sing-box {{ node.singBox?.installed ? '已安装' : '未安装' }}</NText>
+                </div>
+                <div v-if="node.protocols?.length" class="protocol-list">
+                  <div v-for="protocol in node.protocols" :key="protocol.id" class="protocol-row">
+                    <div class="protocol-main">
+                      <div class="protocol-name">
+                        {{ protocol.name }}
+                        <span>{{ protocolMode(protocol) }}</span>
+                      </div>
+                      <NSpace :size="6" class="protocol-badges">
+                        <NTag v-for="badge in protocolBadges(protocol)" :key="badge" size="small" :bordered="false">
+                          {{ badge }}
+                        </NTag>
+                      </NSpace>
+                    </div>
+                    <NPopconfirm @positive-click="removeProtocol(node, protocol.id)">
+                      <template #trigger>
+                        <NButton size="tiny" secondary type="error">删除</NButton>
+                      </template>
+                      删除 {{ protocol.name }} :{{ protocol.port }} 并推送远程配置？
+                    </NPopconfirm>
+                  </div>
+                </div>
+                <NEmpty v-else size="small" description="暂无协议" />
+                <NDivider class="my-4px" />
                 <NGrid :x-gap="8" :y-gap="8" responsive="screen" item-responsive>
                   <NGi span="24 s:10">
                     <NSelect
@@ -1076,19 +1069,17 @@ onUnmounted(() => {
             </NPopover>
             <NPopover trigger="click" placement="top">
               <template #trigger>
-                <NButton size="small" secondary>编辑</NButton>
+                <NButton size="small" secondary>设置</NButton>
               </template>
-              <NSpace vertical :size="8" class="edit-popover">
-                <NInput v-model:value="node.region" size="small" placeholder="手动修正区域" />
-                <NInput v-model:value="node.group" size="small" placeholder="分组" />
-                <NButton size="small" type="primary" block @click="saveRegion(node)">保存</NButton>
-              </NSpace>
-            </NPopover>
-            <NPopover trigger="click" placement="top">
-              <template #trigger>
-                <NButton size="small" secondary>策略</NButton>
-              </template>
-              <NSpace vertical :size="8" class="policy-popover">
+              <NSpace vertical :size="8" class="settings-popover">
+                <NGrid :x-gap="8" :y-gap="8" responsive="screen" item-responsive>
+                  <NGi span="12">
+                    <NInput v-model:value="node.region" size="small" placeholder="区域，如 HK" />
+                  </NGi>
+                  <NGi span="12">
+                    <NInput v-model:value="node.group" size="small" placeholder="分组" />
+                  </NGi>
+                </NGrid>
                 <NGrid :x-gap="8" :y-gap="8" responsive="screen" item-responsive>
                   <NGi span="12">
                     <NInputNumber
@@ -1137,6 +1128,7 @@ onUnmounted(() => {
                   </NGi>
                 </NGrid>
                 <NSpace :size="8">
+                  <NButton size="small" type="primary" @click="saveRegion(node)">保存区域</NButton>
                   <NButton size="small" type="primary" @click="saveTrafficPolicy(node)">保存</NButton>
                   <NPopconfirm @positive-click="resetNodeTraffic(node)">
                     <template #trigger>
@@ -1147,7 +1139,6 @@ onUnmounted(() => {
                 </NSpace>
               </NSpace>
             </NPopover>
-            <NButton size="small" type="primary" secondary @click="queue(node, 'sing-box-apply')">应用配置</NButton>
             <NDropdown :options="nodeMoreActionOptions(node)" trigger="click" @select="key => handleNodeAction(node, String(key))">
               <template #trigger>
                 <NButton size="small">更多</NButton>
@@ -1204,13 +1195,13 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 34px;
+  width: 28px;
   height: 22px;
   border: 1px solid rgba(37, 99, 235, 0.18);
   border-radius: 6px;
   background: rgba(37, 99, 235, 0.08);
   color: #1d4ed8;
-  font-size: 11px;
+  font-size: 15px;
   font-weight: 750;
   line-height: 1;
 }
@@ -1315,7 +1306,7 @@ onUnmounted(() => {
 }
 
 .node-card :deep(.n-card__content) {
-  padding: 12px;
+  padding: 10px;
 }
 
 .node-head {
@@ -1333,9 +1324,9 @@ onUnmounted(() => {
   min-width: 0;
   overflow: hidden;
   color: var(--n-text-color, #1f2937);
-  font-size: 14px;
-  font-weight: 650;
-  line-height: 20px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1350,16 +1341,30 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+.node-quickline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 6px;
+  color: var(--n-text-color-disabled, #64748b);
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.node-quickline span {
+  white-space: nowrap;
+}
+
 .ip-strip {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
-  gap: 6px;
-  margin-top: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 5px;
+  margin-top: 7px;
 }
 
 .ip-pill {
   min-width: 0;
-  padding: 5px 7px;
+  padding: 4px 6px;
   border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 6px;
   background: rgba(148, 163, 184, 0.07);
@@ -1382,7 +1387,7 @@ onUnmounted(() => {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
   font-size: 10px;
   font-weight: 650;
-  line-height: 17px;
+  line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1409,13 +1414,13 @@ onUnmounted(() => {
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-  margin-top: 8px;
+  gap: 5px;
+  margin-top: 7px;
 }
 
 .metric-item {
   min-width: 0;
-  padding: 6px 7px;
+  padding: 5px 6px;
   border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 6px;
   background: rgba(148, 163, 184, 0.07);
@@ -1433,7 +1438,7 @@ onUnmounted(() => {
   min-width: 0;
   overflow: hidden;
   color: var(--n-text-color, #1f2937);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
   line-height: 18px;
   text-overflow: ellipsis;
@@ -1564,13 +1569,20 @@ onUnmounted(() => {
 .node-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
+  margin-top: 8px;
 }
 
-.protocol-popover,
-.edit-popover,
-.policy-popover {
-  width: min(360px, calc(100vw - 48px));
+.node-actions :deep(.n-button) {
+  min-width: 0;
+}
+
+.protocol-popover {
+  width: min(420px, calc(100vw - 48px));
+}
+
+.settings-popover {
+  width: min(380px, calc(100vw - 48px));
 }
 
 @media (max-width: 640px) {
