@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const VERSION: &str = "0.2.1-rust";
+const VERSION: &str = "0.2.2-rust";
 
 #[derive(Clone, Debug)]
 struct Config {

@@ -93,8 +93,8 @@ test('health reports PulseDeck on default product port', async () => {
     const { res, body } = await request(app.base, '/api/v1/health');
     assert.equal(res.status, 200);
     assert.equal(body.name, 'PulseDeck');
-    assert.equal(body.version, '0.2.1');
-    assert.equal(body.agentVersion, '0.2.1-rust');
+    assert.equal(body.version, '0.2.2');
+    assert.equal(body.agentVersion, '0.2.2-rust');
     assert.equal(body.port, 14770);
   } finally {
     await app.close();
@@ -106,7 +106,7 @@ test('agent runtime manifest exposes target metadata', async () => {
   try {
     const { res, body } = await request(app.base, '/api/v1/agents/runtime/manifest');
     assert.equal(res.status, 200);
-    assert.equal(body.agentVersion, '0.2.1-rust');
+    assert.equal(body.agentVersion, '0.2.2-rust');
     assert.ok(Array.isArray(body.targets));
     assert.deepEqual(
       body.targets.map((target) => target.target),
@@ -121,7 +121,7 @@ test('agent runtime manifest exposes target metadata', async () => {
     const single = await request(app.base, '/api/v1/agents/runtime/manifest/linux-x64');
     assert.equal(single.res.status, 200);
     assert.equal(single.body.target, 'linux-x64');
-    assert.equal(single.body.version, '0.2.1-rust');
+    assert.equal(single.body.version, '0.2.2-rust');
   } finally {
     await app.close();
   }

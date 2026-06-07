@@ -88,14 +88,16 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 - Implementation direction for this turn:
   - Continue remaining release/deployment work by making Agent runtime publishing observable and verifiable before cutting the next patch version.
   - Add a panel runtime manifest, installer checksum verification, Agent update-check/update metadata, and a compact Settings UI view for release/runtime state.
-  - Prepare `v0.2.1` after verification, push through GitHub Actions/GHCR, redeploy by Compose pull/up, and smoke test the release.
+  - Prepare `v0.2.2` after verification, push through GitHub Actions/GHCR, redeploy by Compose pull/up, and smoke test the release.
 - Implementation completed before commit:
   - Added `GET /api/v1/agents/runtime/manifest` and per-target manifest responses for `linux-x64`, `linux-arm64`, and `linux-armv7l`, including availability, size, SHA-256, download URL, panel version, and Agent version.
   - Added Agent runtime version and SHA-256 headers to binary downloads.
   - Updated the generated Agent installer to fetch runtime metadata, verify SHA-256 after downloading to the temporary replacement file, and only then atomically replace the installed Agent binary.
   - Updated Rust Agent `pk update-check` to report panel runtime version, size, SHA-256, endpoint, and update status; updated `pk update` to verify SHA-256 before replacing the local binary.
   - Reworked the Settings page into a compact runtime status panel with live health/version data and target download rows.
-  - Bumped panel and Agent metadata to `0.2.1` / `0.2.1-rust`.
+  - Bumped panel and Agent metadata to `0.2.2` / `0.2.2-rust`.
+  - Initial `v0.2.1` tag pushed successfully and panel image tag build passed, but Agent release run `27084362477` failed because `rust:1.87-alpine` no longer provided `rustup`/`cargo` in that Docker run context.
+  - Fixed Agent build infrastructure by switching both the panel Dockerfile Agent build stage and Agent release workflow to `rust:1.87-bookworm`, then moved forward with `v0.2.2` instead of force-moving the already-pushed `v0.2.1` tag.
 - Local verification before commit:
   - `npm run check:api`: passed.
   - `npm test`: passed, 11 tests.

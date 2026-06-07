@@ -1,4 +1,4 @@
-FROM rust:1.87-alpine AS agent-build
+FROM rust:1.87-bookworm AS agent-build
 
 WORKDIR /agent
 COPY apps/agent/Cargo.toml apps/agent/Cargo.lock ./
