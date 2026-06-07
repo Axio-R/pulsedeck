@@ -107,6 +107,25 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm typecheck`: passed.
   - `corepack pnpm build`: passed.
   - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+- Committed and pushed `599aa8e Fix subscriptions and protocol links`, then tagged and pushed `v0.2.13`.
+- GitHub Actions and release:
+  - `main` panel image run `27094212152`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+  - Tag `v0.2.13` panel image run `27094242231`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+  - Tag `v0.2.13` Agent release run `27094242227`: completed successfully and published release assets.
+  - Published Agent release assets: `pulsedeck-agent-v0.2.13-linux-x64.tar.gz` 439144 bytes, `pulsedeck-agent-v0.2.13-linux-arm64.tar.gz` 412667 bytes, `pulsedeck-agent-v0.2.13-linux-armv7l.tar.gz` 408164 bytes, and `SHA256SUMS` 326 bytes.
+- Deployment after `v0.2.13`:
+  - `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+  - `docker compose up -d`: recreated and started `pulsedeck-panel`.
+  - `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed with `version: 0.2.13` and `agentVersion: 0.2.13-rust`.
+  - `GET /api/v1/agents/runtime/manifest/linux-x64`: passed with `version: 0.2.13-rust`, `sizeBytes: 909888`, and SHA-256 `2bf996ee5a2b68aea950a4e65f376516eb6427b008f61d08d1c2ede9ef978d5f`.
+- Post-deploy smoke passed:
+  - Created and deleted a temporary smoke node; protocol creation returned one VLESS Reality link plus raw/clash/v2ray subscription URLs.
+  - The default Clash subscription output contained a real `vless` proxy entry for the smoke node instead of the old placeholder `127.0.0.1` node.
+  - Smoke node region rendered as `🇭🇰 HK`.
+  - Real `hk` node renders as `🇭🇰 HK`, reports `ipMode: warp-v4-ipv6`, `primaryIpv4: null`, `primaryIpv6: 2a14:7581:8400::2:0:a00a`, and `warpIpv4: 104.28.215.69`.
+  - Remotely updated the real `hk` Agent from `0.2.12-rust` to `0.2.13-rust`; command `6ff1297f-41c1-45e0-8ffe-31aa81dfbb9a` succeeded.
+  - `GET /api/v1/commands?limit=20` returned no `running` or `queued` commands after the update.
 
 ### 2026-06-07 (`v0.2.12`)
 
