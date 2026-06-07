@@ -9,6 +9,8 @@ coverage/
 *.log
 pulsedeck.json
 pulsedeck-*.json
+geoip.json
+geosite.json
 *.db
 *.sqlite
 *.sqlite3

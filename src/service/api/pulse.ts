@@ -138,6 +138,19 @@ export interface PulseCommand {
   updatedAt: string;
 }
 
+export interface PulseCommandEvent {
+  id: string;
+  commandId: string;
+  nodeId: string;
+  agentId: string | null;
+  type: string;
+  stream: string;
+  message: string;
+  payload: Record<string, unknown>;
+  sequence: number;
+  createdAt: string;
+}
+
 export interface PulseProfile {
   id: string;
   name: string;
@@ -220,6 +233,16 @@ export function queuePulseCommand(nodeId: string, type: string, payload: Record<
 
 export function fetchPulseCommands() {
   return pulseFetch<{ items: PulseCommand[] }>('/commands');
+}
+
+export function fetchPulseCommandEvents(commandId: string) {
+  return pulseFetch<{ items: PulseCommandEvent[] }>(`/commands/${commandId}/events?format=json`);
+}
+
+export function openPulseCommandEventSource(commandId: string) {
+  const token = localStg.get('token') || '';
+  const separator = API_BASE.includes('?') ? '&' : '?';
+  return new EventSource(`${API_BASE}/commands/${commandId}/events${separator}token=${encodeURIComponent(token)}`);
 }
 
 export function fetchPulseProfiles() {

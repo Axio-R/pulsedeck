@@ -77,12 +77,35 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 - [x] Add protocol/network/traffic/alert control-plane model for the target sing-box panel.
 - [x] Implement first real Rust Agent sing-box executor for protocol add/delete, link reset, and sing-box install/update.
 - [ ] Harden sing-box protocol templates for TLS/Reality/Hysteria2/Tuic/AnyTLS production variants and signed release selection.
-- [ ] Integrate real GeoIP/Geosite databases instead of placeholder region lookup.
-- [ ] Add WebSocket real-time traffic push and SSE command output streaming.
+- [x] Integrate local GeoIP/Geosite database files instead of placeholder region lookup.
+- [x] Add SSE command output streaming.
+- [ ] Add WebSocket real-time traffic push.
 
 ## Log
 
 ### 2026-06-07
+
+- Implementation direction for this turn:
+  - Continue remaining product features after the first sing-box executor.
+  - Make command execution observable through persisted command events and SSE output.
+  - Replace placeholder GeoIP/Geosite lookup with local database file integration without committing database files.
+- Implementation completed in this turn:
+  - Added persistent `commandEvents` storage with automatic queued/running/result/error state events.
+  - Added Agent command event upload endpoint: `POST /api/v1/agents/{agentId}/commands/{commandId}/events`.
+  - Added browser/API command event endpoints, including JSON history and `GET /api/v1/commands/{commandId}/events` SSE streaming.
+  - Updated Rust Agent to emit start and finish/failure command events before uploading final command results.
+  - Updated the Commands UI with a right-side output drawer that loads event history and subscribes to live SSE updates.
+  - Added local GeoIP database support through `PULSEDECK_GEOIP_FILE` or `/app/geoip.json`; entries support CIDR matching and return region/country/city metadata.
+  - Added local Geosite database support through `PULSEDECK_GEOSITE_FILE` or `/app/geosite.json`; entries support exact domain, suffix, and keyword matching.
+  - Added `/api/v1/geosite/lookup` and updated `/api/v1/geoip/lookup` to use the local database loaders.
+  - Added `.gitignore` rules for `geoip.json` and `geosite.json` so local database files are not committed.
+- Local verification after command streaming and GeoIP/Geosite work:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 8 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: could not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+  - No local Docker image build was performed.
 
 - Implementation direction for this turn:
   - Continue optimizing from the worklog's pending items.

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { createPulseDeckServer } from '../src/main.mjs';
@@ -79,6 +79,74 @@ test('node enrollment install script is LXC and Rust multi-arch aware', async ()
     assert.doesNotMatch(script.body, /Node\.js runtime/);
     assert.doesNotMatch(script.body, /node-v/);
   } finally {
+    await app.close();
+  }
+});
+
+test('geoip and geosite lookup use local database files', async () => {
+  const dir = path.join('/tmp', `pulsedeck-geo-test-${process.pid}-${Date.now()}`);
+  await mkdir(dir, { recursive: true });
+  const geoipFile = path.join(dir, 'geoip.json');
+  const geositeFile = path.join(dir, 'geosite.json');
+  await writeFile(
+    geoipFile,
+    JSON.stringify([{ cidr: '203.0.113.0/24', region: 'Tokyo', countryCode: 'JP', city: 'Tokyo' }]),
+    'utf8'
+  );
+  await writeFile(
+    geositeFile,
+    JSON.stringify([{ suffix: 'example.com', code: 'test-sites', name: 'Example Sites' }]),
+    'utf8'
+  );
+  const previousGeoip = process.env.PULSEDECK_GEOIP_FILE;
+  const previousGeosite = process.env.PULSEDECK_GEOSITE_FILE;
+  process.env.PULSEDECK_GEOIP_FILE = geoipFile;
+  process.env.PULSEDECK_GEOSITE_FILE = geositeFile;
+
+  const app = await startServer();
+  try {
+    const login = await request(app.base, '/api/v1/auth/login', {
+      method: 'POST',
+      body: { username: 'admin', password: 'change-me' }
+    });
+    const auth = { authorization: `Bearer ${login.body.token}` };
+
+    const lookup = await request(app.base, '/api/v1/geoip/lookup?ip=203.0.113.8', { headers: auth });
+    assert.equal(lookup.res.status, 200);
+    assert.equal(lookup.body.region, 'Tokyo');
+    assert.equal(lookup.body.countryCode, 'JP');
+    assert.match(lookup.body.source, /geoip-file/);
+
+    const site = await request(app.base, '/api/v1/geosite/lookup?domain=www.example.com', { headers: auth });
+    assert.equal(site.res.status, 200);
+    assert.equal(site.body.matched, true);
+    assert.equal(site.body.groups[0].code, 'test-sites');
+
+    const created = await request(app.base, '/api/v1/nodes', {
+      method: 'POST',
+      headers: auth,
+      body: { name: 'geo-node' }
+    });
+    await request(app.base, `/api/v1/agents/enroll/${created.body.installId}`, {
+      method: 'POST',
+      body: {
+        version: '0.1.0-rust',
+        platform: 'linux',
+        arch: 'x86_64',
+        installDir: '/var/lib/pulsedeck',
+        serviceMode: 'manual',
+        addresses: [{ interface: 'eth0', family: 'ipv4', address: '203.0.113.9', cidr: '203.0.113.9/24' }]
+      }
+    });
+    const nodes = await request(app.base, '/api/v1/nodes', { headers: auth });
+    const discovered = nodes.body.items.find((node) => node.id === created.body.id);
+    assert.equal(discovered.region, 'Tokyo');
+    assert.match(discovered.network.regionSource, /geoip-file/);
+  } finally {
+    if (previousGeoip === undefined) delete process.env.PULSEDECK_GEOIP_FILE;
+    else process.env.PULSEDECK_GEOIP_FILE = previousGeoip;
+    if (previousGeosite === undefined) delete process.env.PULSEDECK_GEOSITE_FILE;
+    else process.env.PULSEDECK_GEOSITE_FILE = previousGeosite;
     await app.close();
   }
 });
@@ -201,6 +269,24 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.equal(protocolCommand.node.protocols.length, 1);
     assert.equal(protocolCommand.node.protocols[0].type, 'vless');
 
+    const progressEvent = await request(app.base, `/api/v1/agents/${agentEnroll.body.agentId}/commands/${protocolCommand.id}/events`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${agentEnroll.body.token}` },
+      body: {
+        type: 'progress',
+        stream: 'stdout',
+        message: 'rendering sing-box config',
+        payload: { step: 'render' }
+      }
+    });
+    assert.equal(progressEvent.res.status, 202);
+
+    const eventsBeforeResult = await request(app.base, `/api/v1/commands/${protocolCommand.id}/events?format=json`, { headers: auth });
+    assert.equal(eventsBeforeResult.res.status, 200);
+    assert.ok(eventsBeforeResult.body.items.some((event) => event.message.includes('queued')));
+    assert.ok(eventsBeforeResult.body.items.some((event) => event.message.includes('running')));
+    assert.ok(eventsBeforeResult.body.items.some((event) => event.message === 'rendering sing-box config'));
+
     const commandResult = await request(app.base, `/api/v1/agents/${agentEnroll.body.agentId}/commands/${protocolCommand.id}/result`, {
       method: 'POST',
       headers: { authorization: `Bearer ${agentEnroll.body.token}` },
@@ -226,6 +312,10 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.deepEqual(withCommandResult.reportedLinks, ['vless://example@203.0.113.10:443#auto-region-node']);
     assert.equal(withCommandResult.singBox.status, 'applied');
     assert.equal(withCommandResult.singBox.configPath, '/etc/sing-box/config.json');
+
+    const eventsAfterResult = await request(app.base, `/api/v1/commands/${protocolCommand.id}/events?format=json`, { headers: auth });
+    assert.ok(eventsAfterResult.body.items.some((event) => event.type === 'result'));
+    assert.ok(eventsAfterResult.body.items.some((event) => event.payload?.status === 'succeeded'));
 
     const reset = await request(app.base, `/api/v1/nodes/${created.body.id}/links/reset`, {
       method: 'POST',

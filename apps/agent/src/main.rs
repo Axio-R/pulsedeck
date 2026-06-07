@@ -209,7 +209,25 @@ fn poll_commands(config: &Config, state: &State) -> Result<(), String> {
         &state.token,
     )?;
     for agent_command in parse_command_items(&response) {
+        let _ = post_command_event(
+            config,
+            state,
+            &agent_command,
+            "state",
+            "state",
+            &format!("started {}", agent_command.kind),
+            "{}",
+        );
         let (status, result) = execute_agent_command(config, state, &agent_command);
+        let _ = post_command_event(
+            config,
+            state,
+            &agent_command,
+            if status == "failed" { "error" } else { "progress" },
+            if status == "failed" { "stderr" } else { "stdout" },
+            if status == "failed" { "command failed" } else { "command finished; uploading result" },
+            &format!("{{\"status\":\"{}\"}}", json_escape(&status)),
+        );
         post_json(
             config,
             &format!(
@@ -593,6 +611,29 @@ fn get_json(config: &Config, endpoint: &str, token: &str) -> Result<String, Stri
     }
     command.arg(&url);
     run_capture(command)
+}
+
+fn post_command_event(config: &Config, state: &State, agent_command: &AgentCommand, kind: &str, stream: &str, message: &str, payload_json: &str) -> Result<String, String> {
+    post_json(
+        config,
+        &format!(
+            "/api/v1/agents/{}/commands/{}/events",
+            url_component(&state.agent_id),
+            url_component(&agent_command.id)
+        ),
+        &state.token,
+        &format!(
+            "{{\"type\":\"{}\",\"stream\":\"{}\",\"message\":\"{}\",\"payload\":{}}}",
+            json_escape(kind),
+            json_escape(stream),
+            json_escape(message),
+            if payload_json.trim_start().starts_with('{') {
+                payload_json
+            } else {
+                "{}"
+            }
+        ),
+    )
 }
 
 fn download_to(url: &str, target: &str) -> Result<(), String> {

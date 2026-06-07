@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { createReadStream } from 'node:fs';
+import { createReadStream, readFileSync, statSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
@@ -12,6 +12,8 @@ const ROOT_DIR = fileURLToPath(new URL('../../..', import.meta.url));
 const WEB_DIST_DIR = path.join(ROOT_DIR, 'dist');
 const WEB_INDEX_FILE = path.join(WEB_DIST_DIR, 'index.html');
 const AGENT_RUNTIME_DIR = path.join(ROOT_DIR, 'agent-dist');
+const DEFAULT_GEOIP_FILE = path.join(ROOT_DIR, 'geoip.json');
+const DEFAULT_GEOSITE_FILE = path.join(ROOT_DIR, 'geosite.json');
 const PORT = Number(process.env.PULSEDECK_PORT || 14770);
 const HOST = process.env.PULSEDECK_HOST || '0.0.0.0';
 const ADMIN_USER = process.env.PULSEDECK_ADMIN_USER || 'admin';
@@ -88,8 +90,8 @@ function isRecent(iso, maxAgeMs = 180_000) {
   return Number.isFinite(ts) && Date.now() - ts <= maxAgeMs;
 }
 
-function requireUser(req, data) {
-  const token = bearerToken(req);
+function requireUser(req, data, url) {
+  const token = bearerToken(req) || url?.searchParams?.get('token') || '';
   if (!token) return null;
   const now = Date.now();
   const session = data.sessions.find((item) => item.token === token && Date.parse(item.expiresAt) > now);
@@ -258,9 +260,110 @@ function isPublicAddress(item) {
   return false;
 }
 
-function detectGeoRegion(_ip) {
-  // Placeholder for local GeoIP/Geosite database integration. The API shape is stable now.
-  return { region: '', countryCode: '', city: '', source: 'geoip-pending' };
+const geoIpCache = { file: '', mtimeMs: 0, entries: [] };
+const geositeCache = { file: '', mtimeMs: 0, entries: [] };
+
+function geoIpFilePath() {
+  return process.env.PULSEDECK_GEOIP_FILE || DEFAULT_GEOIP_FILE;
+}
+
+function geositeFilePath() {
+  return process.env.PULSEDECK_GEOSITE_FILE || DEFAULT_GEOSITE_FILE;
+}
+
+function loadJsonEntries(file, cache) {
+  try {
+    const info = statSync(file);
+    if (cache.file === file && cache.mtimeMs === info.mtimeMs) return cache.entries;
+    const raw = JSON.parse(readFileSync(file, 'utf8'));
+    const entries = Array.isArray(raw) ? raw : Array.isArray(raw.entries) ? raw.entries : Array.isArray(raw.items) ? raw.items : [];
+    cache.file = file;
+    cache.mtimeMs = info.mtimeMs;
+    cache.entries = entries.filter((item) => item && typeof item === 'object');
+    return cache.entries;
+  } catch {
+    cache.file = file;
+    cache.mtimeMs = 0;
+    cache.entries = [];
+    return [];
+  }
+}
+
+function ipToBigInt(ip) {
+  if (net.isIP(ip) === 4) {
+    return ip.split('.').reduce((value, part) => (value << 8n) + BigInt(Number(part)), 0n);
+  }
+  if (net.isIP(ip) !== 6) return null;
+  const [headRaw, tailRaw = ''] = ip.toLowerCase().split('::');
+  const head = headRaw ? headRaw.split(':') : [];
+  const tail = tailRaw ? tailRaw.split(':') : [];
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0) return null;
+  const parts = [...head, ...Array(missing).fill('0'), ...tail];
+  return parts.reduce((value, part) => {
+    const parsed = Number.parseInt(part || '0', 16);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 0xffff) return value;
+    return (value << 16n) + BigInt(parsed);
+  }, 0n);
+}
+
+function cidrContains(cidr, ip) {
+  const [base, prefixRaw] = String(cidr || '').split('/');
+  const family = net.isIP(ip);
+  if (!family || net.isIP(base) !== family) return false;
+  const bits = family === 4 ? 32 : 128;
+  const prefix = Number(prefixRaw ?? bits);
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > bits) return false;
+  const target = ipToBigInt(ip);
+  const start = ipToBigInt(base);
+  if (target == null || start == null) return false;
+  const shift = BigInt(bits - prefix);
+  return (target >> shift) === (start >> shift);
+}
+
+function detectGeoRegion(ip) {
+  if (!net.isIP(ip)) return { region: '', countryCode: '', city: '', source: 'geoip-invalid' };
+  const entries = loadJsonEntries(geoIpFilePath(), geoIpCache);
+  const match = entries.find((entry) => {
+    if (entry.cidr && cidrContains(entry.cidr, ip)) return true;
+    if (Array.isArray(entry.cidrs) && entry.cidrs.some((cidr) => cidrContains(cidr, ip))) return true;
+    return false;
+  });
+  if (!match) return { region: '', countryCode: '', city: '', source: entries.length ? 'geoip-miss' : 'geoip-empty' };
+  return {
+    region: String(match.region || match.name || match.countryCode || '').trim(),
+    countryCode: String(match.countryCode || match.country || '').trim(),
+    city: String(match.city || '').trim(),
+    source: `geoip-file:${path.basename(geoIpFilePath())}`
+  };
+}
+
+function lookupGeosite(domain) {
+  const normalized = String(domain || '').trim().toLowerCase().replace(/\.$/, '');
+  if (!/^[a-z0-9.-]+$/.test(normalized) || !normalized.includes('.')) {
+    return { domain: normalized, matched: false, groups: [], source: 'geosite-invalid' };
+  }
+  const entries = loadJsonEntries(geositeFilePath(), geositeCache);
+  const groups = entries
+    .filter((entry) => {
+      const exact = String(entry.domain || entry.exact || '').toLowerCase();
+      const suffix = String(entry.suffix || '').toLowerCase();
+      const keyword = String(entry.keyword || '').toLowerCase();
+      if (exact && normalized === exact) return true;
+      if (suffix && (normalized === suffix || normalized.endsWith(`.${suffix}`))) return true;
+      if (keyword && normalized.includes(keyword)) return true;
+      return false;
+    })
+    .map((entry) => ({
+      code: String(entry.code || entry.group || entry.category || '').trim(),
+      name: String(entry.name || entry.description || '').trim()
+    }));
+  return {
+    domain: normalized,
+    matched: groups.length > 0,
+    groups,
+    source: entries.length ? `geosite-file:${path.basename(geositeFilePath())}` : 'geosite-empty'
+  };
 }
 
 function analyzeAddresses(addresses = []) {
@@ -419,6 +522,62 @@ function resultData(result) {
   return result && typeof result === 'object' && !Array.isArray(result) ? result : {};
 }
 
+function commandEvents(data, commandId) {
+  return (data.commandEvents || [])
+    .filter((event) => event.commandId === commandId)
+    .slice()
+    .sort((a, b) => {
+      const seq = (Number(a.sequence) || 0) - (Number(b.sequence) || 0);
+      if (seq !== 0) return seq;
+      return String(a.createdAt).localeCompare(String(b.createdAt));
+    });
+}
+
+function appendCommandEvent(draft, command, input = {}) {
+  draft.commandEvents ||= [];
+  const event = {
+    id: randomUUID(),
+    commandId: command.id,
+    nodeId: command.nodeId,
+    agentId: input.agentId ?? command.agentId ?? null,
+    type: String(input.type || 'state').trim() || 'state',
+    stream: String(input.stream || input.type || 'state').trim() || 'state',
+    message: String(input.message || '').slice(0, 16_000),
+    payload: input.payload && typeof input.payload === 'object' && !Array.isArray(input.payload) ? input.payload : {},
+    sequence: Number(input.sequence) || draft.commandEvents.filter((event) => event.commandId === command.id).length + 1,
+    createdAt: input.createdAt || nowIso()
+  };
+  draft.commandEvents.push(event);
+  const related = draft.commandEvents.filter((item) => item.commandId === command.id);
+  if (related.length > 500) {
+    const remove = new Set(related.slice(0, related.length - 500).map((item) => item.id));
+    draft.commandEvents = draft.commandEvents.filter((item) => !remove.has(item.id));
+  }
+  return event;
+}
+
+function createCommand(draft, nodeId, type, payload = {}) {
+  const command = {
+    id: randomUUID(),
+    nodeId,
+    agentId: null,
+    type,
+    payload,
+    status: 'queued',
+    result: null,
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  };
+  draft.commands.push(command);
+  appendCommandEvent(draft, command, {
+    type: 'state',
+    stream: 'state',
+    message: `queued ${type}`,
+    payload: { status: 'queued', type }
+  });
+  return command;
+}
+
 function applyCommandResultSideEffects(draft, command, result) {
   const node = draft.nodes.find((item) => item.id === command.nodeId);
   if (!node) return;
@@ -438,6 +597,39 @@ function applyCommandResultSideEffects(draft, command, result) {
     };
     node.updatedAt = timestamp;
   }
+}
+
+function sendSseEvent(res, type, data) {
+  res.write(`event: ${type}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function sendCommandEventsSse(req, res, store, commandId) {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-store',
+    connection: 'keep-alive'
+  });
+
+  let lastCount = 0;
+  const sendNewEvents = () => {
+    const events = commandEvents(store.data, commandId);
+    for (const event of events.slice(lastCount)) {
+      sendSseEvent(res, event.type || 'message', event);
+    }
+    lastCount = events.length;
+  };
+
+  sendNewEvents();
+  const timer = setInterval(() => {
+    try {
+      sendNewEvents();
+      res.write(': heartbeat\n\n');
+    } catch {
+      clearInterval(timer);
+    }
+  }, 1000);
+  req.on('close', () => clearInterval(timer));
 }
 
 async function serveStatic(req, res, pathname) {
@@ -509,7 +701,7 @@ async function handleApi(req, res, store, url) {
   }
 
   if (method === 'GET' && url.pathname === '/api/v1/auth/getUserInfo') {
-    const session = requireUser(req, data);
+    const session = requireUser(req, data, url);
     if (!session) return sendJson(res, 200, { code: '8888', msg: 'authentication required', data: null });
     return sendSoy(res, {
       userId: 'admin',
@@ -666,10 +858,40 @@ async function handleApi(req, res, store, url) {
             command.status = 'running';
             command.agentId = agentId;
             command.updatedAt = nowIso();
+            appendCommandEvent(draft, command, {
+              type: 'state',
+              stream: 'state',
+              agentId,
+              message: `running ${command.type}`,
+              payload: { status: 'running', type: command.type }
+            });
           }
         }
       });
       return sendJson(res, 200, { items: commands.map((command) => presentAgentCommand(command, node)) });
+    }
+
+    if (method === 'POST' && segments[4] === 'commands' && segments[5] && segments[6] === 'events') {
+      const commandId = segments[5];
+      const body = await readJson(req);
+      let found = false;
+      let event;
+      await store.update((draft) => {
+        const command = draft.commands.find((item) => item.id === commandId && item.agentId === agentId);
+        if (!command) return;
+        found = true;
+        event = appendCommandEvent(draft, command, {
+          agentId,
+          type: body.type || body.stream || 'progress',
+          stream: body.stream || body.type || 'progress',
+          message: body.message || '',
+          payload: body.payload || {},
+          sequence: body.sequence
+        });
+        command.updatedAt = nowIso();
+      });
+      if (!found) return notFound(res);
+      return sendJson(res, 202, { accepted: true, event });
     }
 
     if (method === 'POST' && segments[4] === 'commands' && segments[5] && segments[6] === 'result') {
@@ -683,6 +905,20 @@ async function handleApi(req, res, store, url) {
         command.status = body.status === 'failed' ? 'failed' : 'succeeded';
         command.result = body.result || body;
         applyCommandResultSideEffects(draft, command, command.result);
+        appendCommandEvent(draft, command, {
+          type: command.status === 'failed' ? 'error' : 'result',
+          stream: command.status === 'failed' ? 'stderr' : 'result',
+          agentId,
+          message: command.status === 'failed' ? 'command failed' : 'command succeeded',
+          payload: { status: command.status, result: command.result }
+        });
+        appendCommandEvent(draft, command, {
+          type: 'state',
+          stream: 'state',
+          agentId,
+          message: command.status,
+          payload: { status: command.status }
+        });
         command.updatedAt = nowIso();
       });
       if (!found) return notFound(res);
@@ -696,7 +932,7 @@ async function handleApi(req, res, store, url) {
     return sendText(res, 200, renderSubscription(data, profile), TEXT_HEADERS);
   }
 
-  const session = requireUser(req, data);
+  const session = requireUser(req, data, url);
   if (!session) return forbidden(res, 'authentication required');
 
   if (method === 'GET' && url.pathname === '/api/v1/dashboard') {
@@ -711,6 +947,13 @@ async function handleApi(req, res, store, url) {
     const ip = String(url.searchParams.get('ip') || '').trim();
     if (!net.isIP(ip)) return badRequest(res, 'invalid ip');
     return sendJson(res, 200, { ip, ...detectGeoRegion(ip) });
+  }
+
+  if (method === 'GET' && url.pathname === '/api/v1/geosite/lookup') {
+    const domain = String(url.searchParams.get('domain') || '').trim();
+    const result = lookupGeosite(domain);
+    if (result.source === 'geosite-invalid') return badRequest(res, 'invalid domain');
+    return sendJson(res, 200, result);
   }
 
   if (method === 'GET' && url.pathname === '/api/v1/nodes') {
@@ -771,9 +1014,11 @@ async function handleApi(req, res, store, url) {
       const agentIds = new Set(draft.agents.filter((agent) => agent.nodeId === nodeId).map((agent) => agent.id));
       const beforeAgents = draft.agents.length;
       const beforeCommands = draft.commands.length;
+      const removedCommandIds = new Set(draft.commands.filter((command) => command.nodeId === nodeId || agentIds.has(command.agentId)).map((command) => command.id));
       draft.nodes = draft.nodes.filter((item) => item.id !== nodeId);
       draft.agents = draft.agents.filter((agent) => agent.nodeId !== nodeId);
       draft.commands = draft.commands.filter((command) => command.nodeId !== nodeId && !agentIds.has(command.agentId));
+      draft.commandEvents = (draft.commandEvents || []).filter((event) => !removedCommandIds.has(event.commandId));
       removedAgents = beforeAgents - draft.agents.length;
       removedCommands = beforeCommands - draft.commands.length;
     });
@@ -789,18 +1034,7 @@ async function handleApi(req, res, store, url) {
       node.linkSecret = randomToken(18);
       node.reportedLinks = [];
       node.updatedAt = nowIso();
-      command = {
-        id: randomUUID(),
-        nodeId,
-        agentId: null,
-        type: 'reset-links',
-        payload: { linkSecret: node.linkSecret },
-        status: 'queued',
-        result: null,
-        createdAt: nowIso(),
-        updatedAt: nowIso()
-      };
-      draft.commands.push(command);
+      command = createCommand(draft, nodeId, 'reset-links', { linkSecret: node.linkSecret });
     });
     if (!command) return notFound(res);
     return sendJson(res, 201, command);
@@ -818,18 +1052,7 @@ async function handleApi(req, res, store, url) {
       node.protocols ||= [];
       node.protocols.push(protocol);
       node.updatedAt = nowIso();
-      command = {
-        id: randomUUID(),
-        nodeId,
-        agentId: null,
-        type: 'protocol-add',
-        payload: { protocol },
-        status: 'queued',
-        result: null,
-        createdAt: nowIso(),
-        updatedAt: nowIso()
-      };
-      draft.commands.push(command);
+      command = createCommand(draft, nodeId, 'protocol-add', { protocol });
     });
     if (!protocol) return notFound(res);
     return sendJson(res, 201, { protocol, command });
@@ -847,18 +1070,7 @@ async function handleApi(req, res, store, url) {
       if (!protocol) return;
       node.protocols = node.protocols.filter((item) => item.id !== protocolId);
       node.updatedAt = nowIso();
-      command = {
-        id: randomUUID(),
-        nodeId,
-        agentId: null,
-        type: 'protocol-delete',
-        payload: { protocolId, protocol },
-        status: 'queued',
-        result: null,
-        createdAt: nowIso(),
-        updatedAt: nowIso()
-      };
-      draft.commands.push(command);
+      command = createCommand(draft, nodeId, 'protocol-delete', { protocolId, protocol });
     });
     if (!protocol) return notFound(res);
     return sendJson(res, 200, { deleted: true, protocol, command });
@@ -871,18 +1083,7 @@ async function handleApi(req, res, store, url) {
     await store.update((draft) => {
       const node = draft.nodes.find((item) => item.id === nodeId);
       if (!node) return;
-      command = {
-        id: randomUUID(),
-        nodeId,
-        agentId: null,
-        type: body.type || 'probe',
-        payload: body.payload || {},
-        status: 'queued',
-        result: null,
-        createdAt: nowIso(),
-        updatedAt: nowIso()
-      };
-      draft.commands.push(command);
+      command = createCommand(draft, nodeId, body.type || 'probe', body.payload || {});
     });
     if (!command) return notFound(res);
     return sendJson(res, 201, command);
@@ -894,6 +1095,16 @@ async function handleApi(req, res, store, url) {
         .slice()
         .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))
     });
+  }
+
+  if (method === 'GET' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'commands' && segments[3] && segments[4] === 'events') {
+    const commandId = segments[3];
+    const command = data.commands.find((item) => item.id === commandId);
+    if (!command) return notFound(res);
+    if (url.searchParams.get('format') === 'json') {
+      return sendJson(res, 200, { items: commandEvents(data, commandId) });
+    }
+    return sendCommandEventsSse(req, res, store, commandId);
   }
 
   if (method === 'GET' && url.pathname === '/api/v1/subscription-profiles') {

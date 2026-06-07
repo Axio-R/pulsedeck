@@ -150,6 +150,7 @@ export function createEmptyData() {
     nodes: [],
     agents: [],
     commands: [],
+    commandEvents: [],
     alertEvents: [],
     subscriptionProfiles: DEFAULT_SUBSCRIPTION_PROFILES.map((profile) => ({
       ...profile,
@@ -196,6 +197,7 @@ export function hydrateData(input) {
     nodes: Array.isArray(data.nodes) ? data.nodes : [],
     agents: Array.isArray(data.agents) ? data.agents : [],
     commands: Array.isArray(data.commands) ? data.commands : [],
+    commandEvents: Array.isArray(data.commandEvents) ? data.commandEvents : [],
     alertEvents: Array.isArray(data.alertEvents) ? data.alertEvents : [],
     subscriptionProfiles: Array.isArray(data.subscriptionProfiles) ? data.subscriptionProfiles : [],
     notificationChannels: {
@@ -292,6 +294,19 @@ export function hydrateData(input) {
     result: command.result || null,
     createdAt: command.createdAt || now,
     updatedAt: command.updatedAt || now
+  }));
+
+  hydrated.commandEvents = hydrated.commandEvents.map((event) => ({
+    id: event.id || randomUUID(),
+    commandId: event.commandId || '',
+    nodeId: event.nodeId || '',
+    agentId: event.agentId || null,
+    type: event.type || 'state',
+    stream: event.stream || event.type || 'state',
+    message: event.message || '',
+    payload: event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload) ? event.payload : {},
+    sequence: Number(event.sequence) || 0,
+    createdAt: event.createdAt || now
   }));
 
   hydrated.alertEvents = hydrated.alertEvents.map((event) => ({

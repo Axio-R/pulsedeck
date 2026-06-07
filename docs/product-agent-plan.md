@@ -25,12 +25,13 @@ It is not designed as a heavy multi-tenant airport platform, billing system, or 
 - Node create/list/delete exists, including cleanup of related Agent and command records.
 - Node protocol records and remote protocol add/delete commands exist for VMess, VLESS, Trojan, Shadowsocks, Hysteria2, Tuic, and AnyTLS. The Rust Agent now has a first sing-box executor that renders desired protocol state, validates configs with `sing-box check`, applies configs, restarts common service managers, and returns generated subscription links when apply succeeds.
 - Subscription Profile deletion exists for custom Profiles, and node-level reset-link command queuing exists. Agent-side link regeneration is wired through the sing-box executor; advanced per-protocol TLS/Reality/client-specific link details still need hardening.
-- Agent reports host addresses; the panel classifies IPv4-only, IPv6-only, dual-stack, private/LXC, and WARP IPv4 plus IPv6 style nodes. Full GeoIP/Geosite database integration is not wired yet.
+- Agent reports host addresses; the panel classifies IPv4-only, IPv6-only, dual-stack, private/LXC, and WARP IPv4 plus IPv6 style nodes. GeoIP and Geosite lookup can now use local JSON database files mounted into the panel container.
 - Panel-side cumulative traffic accounting and threshold auto-disable exist from metrics snapshots. Real-time traffic rates still need the WebSocket collector.
 - Rust Agent command queue is HTTP polling today; real-time bidirectional WebSocket control is not implemented yet.
 - Traffic metrics are periodic snapshots today; real-time per-second rate streaming needs a dedicated protocol.
 - Local runtime data is ignored by `.gitignore`, but broader runtime JSON and database patterns should also be ignored.
 - sing-box install/update is intentionally conservative: the Agent reports an existing binary or installs from an explicit `downloadUrl`/`PULSEDECK_SING_BOX_DOWNLOAD_URL`. Automatic package-manager install and signed release selection are still pending.
+- Command events are persisted and exposed through SSE for the browser. This gives the operator live command state/output history, while true bidirectional Agent control remains a later WebSocket phase.
 
 ## Core Modules
 
@@ -113,6 +114,14 @@ Command output should support:
 - progress events.
 - final structured result.
 - cancellation where possible.
+
+Current implementation:
+
+- Panel persists command events in `commandEvents`.
+- Agent can upload event chunks through `POST /api/v1/agents/{agentId}/commands/{commandId}/events`.
+- Browser can read history as JSON with `GET /api/v1/commands/{commandId}/events?format=json`.
+- Browser can subscribe to live output with SSE at `GET /api/v1/commands/{commandId}/events`.
+- Rust Agent emits start and finish/failure events around command execution. Deeper stdout/stderr chunking for long-running installers is still a hardening item.
 
 ## Agent Architecture
 
@@ -247,6 +256,31 @@ SSE event types:
 - `progress`
 - `result`
 - `error`
+
+This endpoint is now implemented for panel users. The browser uses a short-lived query token because native `EventSource` cannot set custom authorization headers.
+
+### GeoIP And Geosite Files
+
+The panel supports local JSON database files without bundling third-party datasets:
+
+- `PULSEDECK_GEOIP_FILE`, default `/app/geoip.json`
+- `PULSEDECK_GEOSITE_FILE`, default `/app/geosite.json`
+
+GeoIP entries support:
+
+```json
+[
+  { "cidr": "203.0.113.0/24", "region": "Tokyo", "countryCode": "JP", "city": "Tokyo" }
+]
+```
+
+Geosite entries support:
+
+```json
+[
+  { "suffix": "example.com", "code": "test-sites", "name": "Example Sites" }
+]
+```
 
 The browser does not need to hold a direct WebSocket to each Agent. The panel receives Agent WebSocket events, persists command output, and fans out browser-visible SSE events.
 

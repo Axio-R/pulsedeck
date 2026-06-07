@@ -27,6 +27,7 @@ The GHCR image builds and packages Rust Agent binaries for `linux-x64`, `linux-a
 - The Agent validates configs with `sing-box check` before replacing the target config file.
 - Service restart tries systemd, OpenRC, then generic `service`; if none succeeds, the command result records that validation passed but restart was not confirmed.
 - Agent-driven sing-box install/update only uses an explicit binary URL from command payload or `PULSEDECK_SING_BOX_DOWNLOAD_URL`; automatic package-manager install is deferred to avoid distro-specific side effects.
+- Command event uploads are best-effort. If an event upload fails because the panel is temporarily unreachable, the Agent still uploads the final command result on the normal result endpoint when possible.
 
 ## Rust Traffic Collector Direction
 
