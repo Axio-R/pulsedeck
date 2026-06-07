@@ -1577,20 +1577,24 @@ async function handleApi(req, res, store, url, realtime = {}) {
     if (!node) return notFound(res);
     let removedAgents = 0;
     let removedCommands = 0;
+    let removedAlertEvents = 0;
     await store.update((draft) => {
       const agentIds = new Set(draft.agents.filter((agent) => agent.nodeId === nodeId).map((agent) => agent.id));
       const beforeAgents = draft.agents.length;
       const beforeCommands = draft.commands.length;
+      const beforeAlertEvents = (draft.alertEvents || []).length;
       const removedCommandIds = new Set(draft.commands.filter((command) => command.nodeId === nodeId || agentIds.has(command.agentId)).map((command) => command.id));
       draft.nodes = draft.nodes.filter((item) => item.id !== nodeId);
       draft.agents = draft.agents.filter((agent) => agent.nodeId !== nodeId);
       draft.commands = draft.commands.filter((command) => command.nodeId !== nodeId && !agentIds.has(command.agentId));
       draft.commandEvents = (draft.commandEvents || []).filter((event) => !removedCommandIds.has(event.commandId));
+      draft.alertEvents = (draft.alertEvents || []).filter((event) => event.nodeId !== nodeId);
       removedAgents = beforeAgents - draft.agents.length;
       removedCommands = beforeCommands - draft.commands.length;
+      removedAlertEvents = beforeAlertEvents - draft.alertEvents.length;
     });
     realtime.broadcastTraffic?.();
-    return sendJson(res, 200, { deleted: true, removedAgents, removedCommands });
+    return sendJson(res, 200, { deleted: true, removedAgents, removedCommands, removedAlertEvents });
   }
 
   if (method === 'POST' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'nodes' && segments[3] && segments[4] === 'links' && segments[5] === 'reset') {
@@ -1710,6 +1714,16 @@ async function handleApi(req, res, store, url, realtime = {}) {
     });
     if (!event) return notFound(res);
     return sendJson(res, 200, event);
+  }
+
+  if (method === 'DELETE' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'alert-events' && segments[3] && !segments[4]) {
+    const eventId = segments[3];
+    const event = (data.alertEvents || []).find((item) => item.id === eventId);
+    if (!event) return notFound(res);
+    await store.update((draft) => {
+      draft.alertEvents = (draft.alertEvents || []).filter((item) => item.id !== eventId);
+    });
+    return sendJson(res, 200, { deleted: true });
   }
 
   if (method === 'GET' && url.pathname === '/api/v1/subscription-profiles') {

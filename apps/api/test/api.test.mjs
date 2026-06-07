@@ -593,6 +593,16 @@ test('alert policy detects offline nodes and traffic limit actions', async () =>
     });
     events = await request(app.base, '/api/v1/alert-events', { headers: auth });
     assert.ok(events.body.items.some((event) => event.nodeId === created.body.id && event.type === 'node-recovered'));
+
+    const deleted = await request(app.base, `/api/v1/nodes/${created.body.id}`, {
+      method: 'DELETE',
+      headers: auth
+    });
+    assert.equal(deleted.res.status, 200);
+    assert.equal(deleted.body.deleted, true);
+    assert.ok(deleted.body.removedAlertEvents >= 1);
+    events = await request(app.base, '/api/v1/alert-events', { headers: auth });
+    assert.equal(events.body.items.some((event) => event.nodeId === created.body.id), false);
   } finally {
     await app.close();
   }

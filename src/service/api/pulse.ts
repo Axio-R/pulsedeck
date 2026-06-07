@@ -262,7 +262,7 @@ export function updatePulseNode(id: string, body: Partial<Pick<PulseNode, 'name'
 }
 
 export function deletePulseNode(id: string) {
-  return pulseFetch<{ deleted: boolean; removedAgents: number; removedCommands: number }>(`/nodes/${id}`, { method: 'DELETE' });
+  return pulseFetch<{ deleted: boolean; removedAgents: number; removedCommands: number; removedAlertEvents: number }>(`/nodes/${id}`, { method: 'DELETE' });
 }
 
 export function resetPulseNodeLinks(id: string) {
@@ -348,4 +348,8 @@ export function checkPulseAlerts() {
 
 export function ackPulseAlertEvent(id: string) {
   return pulseFetch<PulseAlertEvent>(`/alert-events/${id}/ack`, { method: 'POST' });
+}
+
+export function deletePulseAlertEvent(id: string) {
+  return pulseFetch<{ deleted: boolean }>(`/alert-events/${id}`, { method: 'DELETE' });
 }

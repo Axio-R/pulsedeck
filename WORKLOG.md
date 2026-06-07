@@ -95,6 +95,7 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - Added traffic warning/threshold events, with policy-driven actions to disable the affected node subscription or all subscription Profiles when traffic limits are exceeded.
   - Added real notification delivery attempts for configured Telegram Bot API and SMTP/STARTTLS email channels; disabled or incomplete channels are marked as skipped.
   - Reworked the Alerts UI into a compact operations panel with Telegram/email settings, offline/traffic policy controls, manual offline check, event table, delivery/action status, and acknowledgement actions.
+  - Post-deploy smoke exposed that deleted nodes left related alert history behind; added alert-event cleanup on node deletion plus a manual alert-event delete API/UI action.
   - Bumped project and Agent version metadata to `0.2.0` / `0.2.0-rust`.
   - Updated the panel image workflow so `v*` tags also publish a versioned GHCR image tag.
 - Local verification after alert loop and v0.2.0 work:

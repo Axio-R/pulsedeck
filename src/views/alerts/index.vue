@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, h, onMounted, reactive, ref } from 'vue';
-import { NButton, NTag } from 'naive-ui';
+import { NButton, NPopconfirm, NTag } from 'naive-ui';
 import {
   ackPulseAlertEvent,
   checkPulseAlerts,
+  deletePulseAlertEvent,
   fetchPulseAlertEvents,
   fetchPulseAlertPolicy,
   fetchPulseChannels,
@@ -92,11 +93,19 @@ const eventColumns = computed(() => [
   {
     title: '操作',
     key: 'operate',
-    width: 86,
+    width: 150,
     render(row: PulseAlertEvent) {
-      return row.acknowledgedAt
-        ? '-'
-        : h(NButton, { size: 'tiny', secondary: true, onClick: () => ack(row) }, { default: () => '确认' });
+      return h('div', { class: 'table-actions' }, [
+        row.acknowledgedAt ? null : h(NButton, { size: 'tiny', secondary: true, onClick: () => ack(row) }, { default: () => '确认' }),
+        h(
+          NPopconfirm,
+          { onPositiveClick: () => removeEvent(row) },
+          {
+            default: () => '删除这条告警事件？',
+            trigger: () => h(NButton, { size: 'tiny', type: 'error', secondary: true }, { default: () => '删除' })
+          }
+        )
+      ]);
     }
   }
 ]);
@@ -140,6 +149,11 @@ async function runCheck() {
 async function ack(row: PulseAlertEvent) {
   const next = await ackPulseAlertEvent(row.id);
   events.value = events.value.map(item => (item.id === next.id ? next : item));
+}
+
+async function removeEvent(row: PulseAlertEvent) {
+  await deletePulseAlertEvent(row.id);
+  events.value = events.value.filter(item => item.id !== row.id);
 }
 
 function rowKey(row: PulseAlertEvent) {
@@ -293,5 +307,11 @@ onMounted(loadData);
 <style scoped>
 .compact-card :deep(.n-card__content) {
   padding-top: 12px;
+}
+
+.table-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
 }
 </style>
