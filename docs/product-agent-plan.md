@@ -23,14 +23,14 @@ It is not designed as a heavy multi-tenant airport platform, billing system, or 
 ## Current Gaps
 
 - Node create/list/delete exists, including cleanup of related Agent and command records.
-- Node protocol records and remote protocol add/delete commands exist for VMess, VLESS, Trojan, Shadowsocks, Hysteria2, Tuic, and AnyTLS. The Rust Agent now has a first sing-box executor that renders desired protocol state, validates configs with `sing-box check`, applies configs, restarts common service managers, and returns generated subscription links when apply succeeds.
-- Subscription Profile deletion exists for custom Profiles, and node-level reset-link command queuing exists. Agent-side link regeneration is wired through the sing-box executor; advanced per-protocol TLS/Reality/client-specific link details still need hardening.
+- Node protocol records and remote protocol add/delete commands exist for VMess, VLESS, Trojan, Shadowsocks, Hysteria2, Tuic, and AnyTLS. The Rust Agent renders desired protocol state, validates configs with `sing-box check`, applies configs, restarts common service managers, and returns generated subscription links when apply succeeds.
+- Subscription Profile deletion exists for custom Profiles, and node-level reset-link command queuing exists. Agent-side link regeneration is wired through the sing-box executor, including TLS/Reality/WS/gRPC/Hysteria2/Tuic/AnyTLS link parameters when settings are provided.
 - Agent reports host addresses; the panel classifies IPv4-only, IPv6-only, dual-stack, private/LXC, and WARP IPv4 plus IPv6 style nodes. GeoIP and Geosite lookup can now use local JSON database files mounted into the panel container.
-- Panel-side cumulative traffic accounting and threshold auto-disable exist from metrics snapshots. Real-time traffic rates still need the WebSocket collector.
+- Panel-side cumulative traffic accounting and threshold auto-disable exist from metrics snapshots. The browser can subscribe to `/api/v1/traffic/stream` for live node traffic snapshots and RX/TX rates.
 - Rust Agent command queue is HTTP polling today; real-time bidirectional WebSocket control is not implemented yet.
-- Traffic metrics are periodic snapshots today; real-time per-second rate streaming needs a dedicated protocol.
+- Agent traffic metrics are still periodic HTTP snapshots today; the browser-facing real-time stream currently broadcasts panel-calculated rates from those snapshots.
 - Local runtime data is ignored by `.gitignore`, but broader runtime JSON and database patterns should also be ignored.
-- sing-box install/update is intentionally conservative: the Agent reports an existing binary or installs from an explicit `downloadUrl`/`PULSEDECK_SING_BOX_DOWNLOAD_URL`. Automatic package-manager install and signed release selection are still pending.
+- sing-box install/update is intentionally conservative: the Agent reports an existing binary, installs from an explicit `downloadUrl`/`PULSEDECK_SING_BOX_DOWNLOAD_URL`, or selects an official versioned release tarball from `payload.version` / `PULSEDECK_SING_BOX_VERSION` with optional SHA-256 verification. Automatic package-manager install remains deferred.
 - Command events are persisted and exposed through SSE for the browser. This gives the operator live command state/output history, while true bidirectional Agent control remains a later WebSocket phase.
 
 ## Core Modules
@@ -84,6 +84,7 @@ Current first implementation:
 - Existing config files are backed up before replacement.
 - `sing-box-render` writes an Agent-local preview config and returns preview links without publishing them as active subscription links.
 - Generated links are reported back to the panel only after apply succeeds.
+- TLS protocols require certificate/key paths unless Reality is configured. Reality requires key material generated outside PulseDeck and passed through protocol settings.
 
 ### Subscription Distribution
 

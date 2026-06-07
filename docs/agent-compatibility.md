@@ -26,7 +26,8 @@ The GHCR image builds and packages Rust Agent binaries for `linux-x64`, `linux-a
 - sing-box operations degrade explicitly: render-only commands can work without a local `sing-box` binary, but apply/protocol/reset operations fail with a clear result until `sing-box` is installed.
 - The Agent validates configs with `sing-box check` before replacing the target config file.
 - Service restart tries systemd, OpenRC, then generic `service`; if none succeeds, the command result records that validation passed but restart was not confirmed.
-- Agent-driven sing-box install/update only uses an explicit binary URL from command payload or `PULSEDECK_SING_BOX_DOWNLOAD_URL`; automatic package-manager install is deferred to avoid distro-specific side effects.
+- Agent-driven sing-box install/update can use an explicit binary URL from command payload or `PULSEDECK_SING_BOX_DOWNLOAD_URL`. It can also select an official versioned `SagerNet/sing-box` Linux release tarball from `payload.version` or `PULSEDECK_SING_BOX_VERSION`, extract the embedded binary, and verify an optional SHA-256 checksum.
+- Automatic package-manager install is deferred to avoid distro-specific side effects.
 - Command event uploads are best-effort. If an event upload fails because the panel is temporarily unreachable, the Agent still uploads the final command result on the normal result endpoint when possible.
 
 ## Rust Traffic Collector Direction

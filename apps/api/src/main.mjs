@@ -4,7 +4,7 @@ import { readFile, stat } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createNode, createNodeProtocol, JsonStore, nowIso, randomToken, SUPPORTED_PROXY_PROTOCOLS } from './store.mjs';
 import { renderAgentInstallScript } from './install-script.mjs';
 
@@ -420,6 +420,27 @@ function metricsTraffic(metrics) {
   );
 }
 
+function trafficSnapshot(data) {
+  return {
+    type: 'traffic.snapshot',
+    time: nowIso(),
+    items: data.nodes.map((node) => ({
+      id: node.id,
+      name: node.name,
+      status: node.status,
+      agentStatus: node.agentStatus,
+      online: isRecent(node.lastSeenAt),
+      lastSeenAt: node.lastSeenAt,
+      region: node.region,
+      displayRegion: node.region || node.network?.detectedRegion || '自动识别中',
+      subscriptionEnabled: node.subscriptionEnabled,
+      metrics: node.metrics || null,
+      traffic: node.traffic || {},
+      network: node.network || {}
+    }))
+  };
+}
+
 function addAlertEvent(data, event) {
   data.alertEvents ||= [];
   data.alertEvents.push({
@@ -435,15 +456,22 @@ function updateTrafficAccounting(data, node, metrics) {
   const current = metricsTraffic(metrics);
   if (!current.rx && !current.tx) return;
   const traffic = node.traffic || {};
+  const previousUpdatedAt = traffic.updatedAt ? Date.parse(traffic.updatedAt) : 0;
+  const currentUpdatedAt = Date.now();
   const lastRx = Number(traffic.lastRxBytes) || 0;
   const lastTx = Number(traffic.lastTxBytes) || 0;
   const deltaRx = lastRx > 0 && current.rx >= lastRx ? current.rx - lastRx : 0;
   const deltaTx = lastTx > 0 && current.tx >= lastTx ? current.tx - lastTx : 0;
+  const elapsedSeconds = previousUpdatedAt > 0 ? Math.max((currentUpdatedAt - previousUpdatedAt) / 1000, 1) : 0;
   traffic.totalRxBytes = (Number(traffic.totalRxBytes) || 0) + deltaRx;
   traffic.totalTxBytes = (Number(traffic.totalTxBytes) || 0) + deltaTx;
   traffic.totalBytes = traffic.totalRxBytes + traffic.totalTxBytes;
   traffic.lastRxBytes = current.rx;
   traffic.lastTxBytes = current.tx;
+  traffic.lastDeltaRxBytes = deltaRx;
+  traffic.lastDeltaTxBytes = deltaTx;
+  traffic.rxRateBytesPerSecond = elapsedSeconds ? Math.round(deltaRx / elapsedSeconds) : 0;
+  traffic.txRateBytesPerSecond = elapsedSeconds ? Math.round(deltaTx / elapsedSeconds) : 0;
   traffic.updatedAt = nowIso();
   const threshold = Number(traffic.thresholdBytes) || 0;
   if (threshold > 0 && traffic.totalBytes >= threshold && !traffic.thresholdExceededAt) {
@@ -632,6 +660,105 @@ function sendCommandEventsSse(req, res, store, commandId) {
   req.on('close', () => clearInterval(timer));
 }
 
+function websocketAccept(key) {
+  return createHash('sha1')
+    .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+    .digest('base64');
+}
+
+function websocketFrame(payload) {
+  const body = Buffer.from(JSON.stringify(payload), 'utf8');
+  if (body.length < 126) return Buffer.concat([Buffer.from([0x81, body.length]), body]);
+  if (body.length <= 0xffff) {
+    const header = Buffer.alloc(4);
+    header[0] = 0x81;
+    header[1] = 126;
+    header.writeUInt16BE(body.length, 2);
+    return Buffer.concat([header, body]);
+  }
+  const header = Buffer.alloc(10);
+  header[0] = 0x81;
+  header[1] = 127;
+  header.writeBigUInt64BE(BigInt(body.length), 2);
+  return Buffer.concat([header, body]);
+}
+
+function writeWebSocket(socket, payload) {
+  if (socket.destroyed || socket.writableEnded) return;
+  socket.write(websocketFrame(payload));
+}
+
+function closeUpgrade(socket, status = 401, detail = 'Unauthorized') {
+  socket.write(`HTTP/1.1 ${status} ${detail}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  socket.destroy();
+}
+
+function createTrafficHub(store) {
+  const clients = new Set();
+  let heartbeatTimer = null;
+
+  const startHeartbeat = () => {
+    if (heartbeatTimer) return;
+    heartbeatTimer = setInterval(() => {
+      for (const socket of clients) writeWebSocket(socket, { type: 'heartbeat', time: nowIso() });
+    }, 15_000);
+  };
+
+  const stopHeartbeat = () => {
+    if (clients.size > 0 || !heartbeatTimer) return;
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  };
+
+  return {
+    add(socket) {
+      clients.add(socket);
+      startHeartbeat();
+      writeWebSocket(socket, trafficSnapshot(store.data));
+      socket.on('close', () => {
+        clients.delete(socket);
+        stopHeartbeat();
+      });
+      socket.on('error', () => {
+        clients.delete(socket);
+        stopHeartbeat();
+      });
+      socket.on('data', (chunk) => {
+        if (chunk[0] === 0x88) socket.end();
+      });
+    },
+    broadcast() {
+      if (!clients.size) return;
+      const payload = trafficSnapshot(store.data);
+      for (const socket of clients) writeWebSocket(socket, payload);
+    },
+    close() {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+      for (const socket of clients) socket.destroy();
+      clients.clear();
+    }
+  };
+}
+
+function handleTrafficUpgrade(req, socket, store, trafficHub) {
+  const url = new URL(req.url || '/', `http://${req.headers.host || `127.0.0.1:${PORT}`}`);
+  if (url.pathname !== '/api/v1/traffic/stream') return closeUpgrade(socket, 404, 'Not Found');
+  if (!requireUser(req, store.data, url)) return closeUpgrade(socket, 403, 'Forbidden');
+  const key = String(req.headers['sec-websocket-key'] || '');
+  if (!key || String(req.headers.upgrade || '').toLowerCase() !== 'websocket') return closeUpgrade(socket, 400, 'Bad Request');
+  socket.write(
+    [
+      'HTTP/1.1 101 Switching Protocols',
+      'Upgrade: websocket',
+      'Connection: Upgrade',
+      `Sec-WebSocket-Accept: ${websocketAccept(key)}`,
+      '\r\n'
+    ].join('\r\n')
+  );
+  trafficHub.add(socket);
+}
+
 async function serveStatic(req, res, pathname) {
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const target = path.normalize(path.join(WEB_DIST_DIR, rel));
@@ -666,7 +793,7 @@ function mimeType(file) {
   return 'application/octet-stream';
 }
 
-async function handleApi(req, res, store, url) {
+async function handleApi(req, res, store, url, realtime = {}) {
   const data = store.data;
   const method = req.method || 'GET';
   const segments = url.pathname.split('/').filter(Boolean);
@@ -799,6 +926,7 @@ async function handleApi(req, res, store, url) {
       };
     });
     if (!response) return notFound(res);
+    realtime.broadcastTraffic?.();
     return sendJson(res, 200, response);
   }
 
@@ -821,6 +949,7 @@ async function handleApi(req, res, store, url) {
           });
         }
       });
+      realtime.broadcastTraffic?.();
       return sendJson(res, 200, { accepted: true, time: nowIso() });
     }
 
@@ -837,6 +966,7 @@ async function handleApi(req, res, store, url) {
           });
         }
       });
+      realtime.broadcastTraffic?.();
       return sendJson(res, 200, { accepted: true });
     }
 
@@ -847,6 +977,7 @@ async function handleApi(req, res, store, url) {
         const draftNode = draft.nodes.find((item) => item.id === draftAgent?.nodeId);
         if (draftAgent && draftNode) updateNodeFromAgent(draft, draftNode, draftAgent, { diagnostics: body });
       });
+      realtime.broadcastTraffic?.();
       return sendJson(res, 200, { accepted: true });
     }
 
@@ -969,6 +1100,7 @@ async function handleApi(req, res, store, url) {
       node = createNode(body);
       draft.nodes.push(node);
     });
+    realtime.broadcastTraffic?.();
     return sendJson(res, 201, presentNode(node, req));
   }
 
@@ -1001,6 +1133,7 @@ async function handleApi(req, res, store, url) {
       node.updatedAt = nowIso();
     });
     if (!node) return notFound(res);
+    realtime.broadcastTraffic?.();
     return sendJson(res, 200, presentNode(node, req));
   }
 
@@ -1022,6 +1155,7 @@ async function handleApi(req, res, store, url) {
       removedAgents = beforeAgents - draft.agents.length;
       removedCommands = beforeCommands - draft.commands.length;
     });
+    realtime.broadcastTraffic?.();
     return sendJson(res, 200, { deleted: true, removedAgents, removedCommands });
   }
 
@@ -1037,6 +1171,7 @@ async function handleApi(req, res, store, url) {
       command = createCommand(draft, nodeId, 'reset-links', { linkSecret: node.linkSecret });
     });
     if (!command) return notFound(res);
+    realtime.broadcastTraffic?.();
     return sendJson(res, 201, command);
   }
 
@@ -1055,6 +1190,7 @@ async function handleApi(req, res, store, url) {
       command = createCommand(draft, nodeId, 'protocol-add', { protocol });
     });
     if (!protocol) return notFound(res);
+    realtime.broadcastTraffic?.();
     return sendJson(res, 201, { protocol, command });
   }
 
@@ -1073,6 +1209,7 @@ async function handleApi(req, res, store, url) {
       command = createCommand(draft, nodeId, 'protocol-delete', { protocolId, protocol });
     });
     if (!protocol) return notFound(res);
+    realtime.broadcastTraffic?.();
     return sendJson(res, 200, { deleted: true, protocol, command });
   }
 
@@ -1215,8 +1352,9 @@ async function handleApi(req, res, store, url) {
 export async function createPulseDeckServer(options = {}) {
   const store = options.store || new JsonStore(options.dataFile);
   await store.load();
+  const trafficHub = createTrafficHub(store);
 
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     try {
       res.setHeader('access-control-allow-origin', '*');
       res.setHeader('access-control-allow-methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
@@ -1229,7 +1367,7 @@ export async function createPulseDeckServer(options = {}) {
 
       const url = new URL(req.url || '/', `http://${req.headers.host || `127.0.0.1:${PORT}`}`);
       if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/sub/')) {
-        await handleApi(req, res, store, url);
+        await handleApi(req, res, store, url, { broadcastTraffic: () => trafficHub.broadcast() });
         return;
       }
       await serveStatic(req, res, url.pathname);
@@ -1238,6 +1376,9 @@ export async function createPulseDeckServer(options = {}) {
       sendJson(res, 500, { detail: error.message || 'internal server error' });
     }
   });
+  server.on('upgrade', (req, socket) => handleTrafficUpgrade(req, socket, store, trafficHub));
+  server.on('close', () => trafficHub.close());
+  return server;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

@@ -75,6 +75,10 @@ export interface PulseNode {
     totalRxBytes: number;
     totalTxBytes: number;
     totalBytes: number;
+    lastDeltaRxBytes: number;
+    lastDeltaTxBytes: number;
+    rxRateBytesPerSecond: number;
+    txRateBytesPerSecond: number;
     thresholdBytes: number;
     warningPercent: number;
     autoDisableSubscription: boolean;
@@ -151,6 +155,27 @@ export interface PulseCommandEvent {
   createdAt: string;
 }
 
+export interface PulseTrafficNode {
+  id: string;
+  name: string;
+  status: string;
+  agentStatus: string;
+  online: boolean;
+  lastSeenAt: string | null;
+  region: string;
+  displayRegion: string;
+  subscriptionEnabled: boolean;
+  metrics: PulseNode['metrics'];
+  traffic: PulseNode['traffic'];
+  network: PulseNode['network'];
+}
+
+export interface PulseTrafficEvent {
+  type: 'traffic.snapshot' | 'heartbeat';
+  time: string;
+  items?: PulseTrafficNode[];
+}
+
 export interface PulseProfile {
   id: string;
   name: string;
@@ -219,7 +244,7 @@ export function resetPulseNodeLinks(id: string) {
   return pulseFetch<PulseCommand>(`/nodes/${id}/links/reset`, { method: 'POST' });
 }
 
-export function createPulseNodeProtocol(nodeId: string, body: { type: string; port?: number | null; variant?: string; name?: string }) {
+export function createPulseNodeProtocol(nodeId: string, body: { type: string; port?: number | null; variant?: string; name?: string; settings?: Record<string, unknown> }) {
   return pulseFetch<{ protocol: PulseNodeProtocol; command: PulseCommand }>(`/nodes/${nodeId}/protocols`, { method: 'POST', body });
 }
 
@@ -243,6 +268,15 @@ export function openPulseCommandEventSource(commandId: string) {
   const token = localStg.get('token') || '';
   const separator = API_BASE.includes('?') ? '&' : '?';
   return new EventSource(`${API_BASE}/commands/${commandId}/events${separator}token=${encodeURIComponent(token)}`);
+}
+
+export function openPulseTrafficSocket() {
+  const token = localStg.get('token') || '';
+  const base = new URL(API_BASE, window.location.origin);
+  const url = new URL(`${base.toString().replace(/\/$/, '')}/traffic/stream`);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.searchParams.set('token', token);
+  return new WebSocket(url);
 }
 
 export function fetchPulseProfiles() {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, reactive, ref } from 'vue';
+import { computed, h, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { NButton, NPopconfirm, NTag } from 'naive-ui';
 import {
   createPulseNode,
@@ -8,18 +8,23 @@ import {
   deletePulseNodeProtocol,
   fetchPulseNodes,
   fetchPulseProtocols,
+  openPulseTrafficSocket,
   queuePulseCommand,
   resetPulseNodeLinks,
   updatePulseNode,
   type PulseNode,
-  type PulseProtocolMeta
+  type PulseProtocolMeta,
+  type PulseTrafficEvent
 } from '@/service/api';
 
 const loading = ref(false);
 const nodes = ref<PulseNode[]>([]);
 const protocolMetas = ref<PulseProtocolMeta[]>([]);
 const form = reactive({ name: '', region: '', tags: '' });
-const protocolDrafts = reactive<Record<string, { type: string; port: number | null; variant: string }>>({});
+const protocolDrafts = reactive<Record<string, { type: string; port: number | null; variant: string; settingsJson: string }>>({});
+let trafficSocket: WebSocket | null = null;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let allowReconnect = true;
 
 const columns = computed(() => [
   { title: '节点', key: 'name', minWidth: 160 },
@@ -148,7 +153,8 @@ function draftFor(node: PulseNode) {
     protocolDrafts[node.id] = {
       type: first?.type || 'vless',
       port: first?.defaultPort || 443,
-      variant: ''
+      variant: '',
+      settingsJson: ''
     };
   }
   return protocolDrafts[node.id];
@@ -169,12 +175,25 @@ function syncDraftPort(node: PulseNode) {
 
 async function addProtocol(node: PulseNode) {
   const draft = draftFor(node);
+  let settings: Record<string, unknown> = {};
+  if (draft.settingsJson.trim()) {
+    try {
+      const parsed = JSON.parse(draft.settingsJson) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('settings must be an object');
+      settings = parsed as Record<string, unknown>;
+    } catch {
+      window.$message?.error('高级设置必须是 JSON 对象');
+      return;
+    }
+  }
   const result = await createPulseNodeProtocol(node.id, {
     type: draft.type,
     port: draft.port,
-    variant: draft.variant
+    variant: draft.variant,
+    settings
   });
   node.protocols.push(result.protocol);
+  draft.settingsJson = '';
   window.$message?.success(`已添加 ${result.protocol.name}，命令已入队`);
 }
 
@@ -212,13 +231,70 @@ function formatBytes(value?: number) {
   return `${number} B`;
 }
 
+function formatRate(value?: number) {
+  return `${formatBytes(value)}/s`;
+}
+
+function applyTrafficEvent(event: PulseTrafficEvent) {
+  if (event.type !== 'traffic.snapshot' || !event.items?.length) return;
+  for (const item of event.items) {
+    const node = nodes.value.find(current => current.id === item.id);
+    if (!node) continue;
+    node.status = item.status;
+    node.agentStatus = item.agentStatus;
+    node.online = item.online;
+    node.lastSeenAt = item.lastSeenAt;
+    node.region = item.region;
+    node.displayRegion = item.displayRegion;
+    node.subscriptionEnabled = item.subscriptionEnabled;
+    node.metrics = item.metrics;
+    node.traffic = item.traffic;
+    node.network = item.network;
+  }
+}
+
+function scheduleTrafficReconnect() {
+  if (!allowReconnect || reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectTrafficStream();
+  }, 3000);
+}
+
+function connectTrafficStream() {
+  if (trafficSocket) trafficSocket.close();
+  try {
+    trafficSocket = openPulseTrafficSocket();
+    trafficSocket.onmessage = event => {
+      try {
+        applyTrafficEvent(JSON.parse(event.data) as PulseTrafficEvent);
+      } catch {
+        // Ignore malformed frames from interrupted connections.
+      }
+    };
+    trafficSocket.onclose = scheduleTrafficReconnect;
+    trafficSocket.onerror = () => trafficSocket?.close();
+  } catch {
+    scheduleTrafficReconnect();
+  }
+}
+
 async function removeNode(node: PulseNode) {
   const result = await deletePulseNode(node.id);
   nodes.value = nodes.value.filter(item => item.id !== node.id);
   window.$message?.success(`节点已删除，清理 Agent ${result.removedAgents} 个、命令 ${result.removedCommands} 条`);
 }
 
-onMounted(loadData);
+onMounted(() => {
+  loadData();
+  connectTrafficStream();
+});
+
+onUnmounted(() => {
+  allowReconnect = false;
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (trafficSocket) trafficSocket.close();
+});
 </script>
 
 <template>
@@ -263,6 +339,9 @@ onMounted(loadData);
             <NDescriptionsItem label="CPU">{{ node.metrics?.cpu?.usagePercent ?? '-' }}%</NDescriptionsItem>
             <NDescriptionsItem label="内存">{{ node.metrics?.memory?.usagePercent ?? '-' }}%</NDescriptionsItem>
             <NDescriptionsItem label="流量">{{ formatBytes(node.traffic?.totalBytes) }}</NDescriptionsItem>
+            <NDescriptionsItem label="实时速率">
+              {{ formatRate(node.traffic?.rxRateBytesPerSecond) }} / {{ formatRate(node.traffic?.txRateBytesPerSecond) }}
+            </NDescriptionsItem>
             <NDescriptionsItem label="订阅">{{ node.subscriptionEnabled ? '启用' : '停用' }}</NDescriptionsItem>
           </NDescriptions>
           <NGrid :x-gap="8" :y-gap="8" responsive="screen" item-responsive class="mt-12px">
@@ -294,6 +373,14 @@ onMounted(loadData);
               </NGi>
               <NGi span="24 s:4">
                 <NButton type="primary" block @click="addProtocol(node)">添加</NButton>
+              </NGi>
+              <NGi span="24">
+                <NInput
+                  v-model:value="draftFor(node).settingsJson"
+                  type="textarea"
+                  :autosize="{ minRows: 2, maxRows: 4 }"
+                  placeholder="高级设置 JSON"
+                />
               </NGi>
             </NGrid>
           </NSpace>

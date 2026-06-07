@@ -648,6 +648,122 @@ fn download_to(url: &str, target: &str) -> Result<(), String> {
     }
 }
 
+fn select_sing_box_download_url(agent_command: &AgentCommand) -> Result<String, String> {
+    if let Some(download_url) = json_get_string(&agent_command.payload_json, "downloadUrl") {
+        if !download_url.trim().is_empty() {
+            return Ok(download_url);
+        }
+    }
+    if let Ok(download_url) = env::var("PULSEDECK_SING_BOX_DOWNLOAD_URL") {
+        if !download_url.trim().is_empty() {
+            return Ok(download_url);
+        }
+    }
+
+    let version = json_get_string(&agent_command.payload_json, "version")
+        .or_else(|| env::var("PULSEDECK_SING_BOX_VERSION").ok())
+        .unwrap_or_default()
+        .trim_start_matches('v')
+        .to_string();
+    if version.is_empty() {
+        return Ok(String::new());
+    }
+    let target = json_get_string(&agent_command.payload_json, "target")
+        .or_else(|| env::var("PULSEDECK_SING_BOX_TARGET").ok())
+        .unwrap_or_else(|| env::consts::ARCH.to_string());
+    let arch = sing_box_release_arch(target.trim())?;
+    Ok(format!(
+        "https://github.com/SagerNet/sing-box/releases/download/v{version}/sing-box-{version}-linux-{arch}.tar.gz"
+    ))
+}
+
+fn sing_box_release_arch(target: &str) -> Result<&'static str, String> {
+    match target {
+        "x86_64" | "amd64" | "linux-x64" | "linux-amd64" => Ok("amd64"),
+        "aarch64" | "arm64" | "linux-arm64" => Ok("arm64"),
+        "arm" | "armv7" | "armv7l" | "linux-armv7l" | "linux-armv7" => Ok("armv7"),
+        "i386" | "i686" | "386" | "linux-386" => Ok("386"),
+        other => Err(format!("unsupported sing-box release target: {other}")),
+    }
+}
+
+fn verify_download_checksum(agent_command: &AgentCommand, file: &Path) -> Result<(), String> {
+    let expected = json_get_string(&agent_command.payload_json, "sha256")
+        .or_else(|| json_get_string(&agent_command.payload_json, "checksum"))
+        .or_else(|| env::var("PULSEDECK_SING_BOX_SHA256").ok())
+        .unwrap_or_default();
+    let expected = expected.split_whitespace().next().unwrap_or("").trim().to_ascii_lowercase();
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let actual = file_sha256(file)?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!("sing-box checksum mismatch: expected {expected}, got {actual}"))
+    }
+}
+
+fn file_sha256(file: &Path) -> Result<String, String> {
+    let output = if command_exists("sha256sum") {
+        Command::new("sha256sum")
+            .arg(file)
+            .output()
+            .map_err(|error| format!("cannot run sha256sum: {error}"))?
+    } else if command_exists("shasum") {
+        Command::new("shasum")
+            .args(["-a", "256"])
+            .arg(file)
+            .output()
+            .map_err(|error| format!("cannot run shasum: {error}"))?
+    } else {
+        return Err("sha256 verification requested but sha256sum/shasum was not found".to_string());
+    };
+    if !output.status.success() {
+        return Err("sha256 command failed".to_string());
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    Ok(raw.split_whitespace().next().unwrap_or("").to_ascii_lowercase())
+}
+
+fn extract_sing_box_archive(archive: &Path, target: &Path) -> Result<(), String> {
+    let tmp_dir = archive
+        .parent()
+        .unwrap_or_else(|| Path::new("/tmp"))
+        .join(format!("sing-box.extract.{}.{}", std::process::id(), now_string()));
+    fs::create_dir_all(&tmp_dir).map_err(|error| format!("cannot create extract dir: {error}"))?;
+    let archive_arg = archive.to_string_lossy().to_string();
+    let tmp_arg = tmp_dir.to_string_lossy().to_string();
+    let status = Command::new("tar")
+        .args(["-xzf", &archive_arg, "-C", &tmp_arg])
+        .status()
+        .map_err(|error| format!("cannot run tar: {error}"))?;
+    if !status.success() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err("cannot extract sing-box release archive".to_string());
+    }
+    let binary = find_named_file(&tmp_dir, "sing-box").ok_or_else(|| "sing-box binary not found in release archive".to_string())?;
+    fs::copy(&binary, target).map_err(|error| format!("cannot copy sing-box binary from archive: {error}"))?;
+    let _ = fs::remove_dir_all(&tmp_dir);
+    Ok(())
+}
+
+fn find_named_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.file_name().and_then(|item| item.to_str()) == Some(name) {
+            return Some(path);
+        }
+        if path.is_dir() {
+            if let Some(found) = find_named_file(&path, name) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 fn run_capture(mut command: Command) -> Result<String, String> {
     let output = command.output().map_err(|error| format!("cannot run curl: {error}"))?;
     if output.status.success() {
@@ -742,18 +858,27 @@ fn install_or_update_sing_box(config: &Config, agent_command: &AgentCommand, rei
         }
     }
 
-    let download_url = json_get_string(&agent_command.payload_json, "downloadUrl")
-        .or_else(|| env::var("PULSEDECK_SING_BOX_DOWNLOAD_URL").ok())
-        .unwrap_or_default();
+    let download_url = select_sing_box_download_url(agent_command)?;
     if download_url.is_empty() {
-        return Err("sing-box binary was not found; provide payload.downloadUrl or set PULSEDECK_SING_BOX_DOWNLOAD_URL".to_string());
+        return Err("sing-box binary was not found; provide payload.downloadUrl, payload.version, PULSEDECK_SING_BOX_DOWNLOAD_URL, or PULSEDECK_SING_BOX_VERSION".to_string());
     }
 
     let bin_dir = Path::new(&config.agent_home).join("bin");
     fs::create_dir_all(&bin_dir).map_err(|error| format!("cannot create sing-box bin dir: {error}"))?;
     let target = bin_dir.join("sing-box");
     let next = bin_dir.join("sing-box.next");
-    download_to(&download_url, &next.to_string_lossy())?;
+    let archive_download = download_url.ends_with(".tar.gz") || download_url.ends_with(".tgz");
+    let download_target = if archive_download {
+        bin_dir.join("sing-box.download.tar.gz")
+    } else {
+        next.clone()
+    };
+    download_to(&download_url, &download_target.to_string_lossy())?;
+    verify_download_checksum(agent_command, &download_target)?;
+    if archive_download {
+        extract_sing_box_archive(&download_target, &next)?;
+        let _ = fs::remove_file(&download_target);
+    }
     make_executable(&next)?;
     if target.is_file() {
         let backup = bin_dir.join(format!("sing-box.{}.bak", now_string()));
@@ -865,7 +990,7 @@ fn protocol_inbound_json(protocol: &NodeProtocol, secret: &str) -> Result<String
     let password = protocol_password(protocol, secret);
     let uuid = protocol_uuid(protocol, secret);
     let transport = protocol_transport_json(protocol);
-    let tls = protocol_tls_json(protocol);
+    let tls = protocol_tls_json(protocol, secret)?;
     let common = format!(
         "\"type\":\"{}\",\"tag\":\"{}\",\"listen\":\"{}\",\"listen_port\":{}",
         json_escape(&protocol.kind),
@@ -880,17 +1005,41 @@ fn protocol_inbound_json(protocol: &NodeProtocol, secret: &str) -> Result<String
                 .unwrap_or_else(|| "2022-blake3-aes-128-gcm".to_string());
             format!("{common},\"method\":\"{}\",\"password\":\"{}\"", json_escape(&method), json_escape(&password))
         }
-        "vmess" => format!("{common},\"users\":[{{\"uuid\":\"{}\",\"alterId\":0}}]{}", json_escape(&uuid), transport),
+        "vmess" => format!("{common},\"users\":[{{\"uuid\":\"{}\",\"alterId\":0}}]{}{}", json_escape(&uuid), transport, tls),
         "vless" => format!("{common},\"users\":[{{\"uuid\":\"{}\",\"flow\":\"{}\"}}]{}{}", json_escape(&uuid), json_escape(&json_get_string(&protocol.settings_json, "flow").unwrap_or_default()), transport, tls),
         "trojan" => format!("{common},\"users\":[{{\"password\":\"{}\"}}]{}{}", json_escape(&password), transport, tls),
-        "hysteria2" => format!("{common},\"users\":[{{\"password\":\"{}\"}}]{}", json_escape(&password), tls),
-        "tuic" => format!(
-            "{common},\"users\":[{{\"uuid\":\"{}\",\"password\":\"{}\"}}],\"congestion_control\":\"{}\"{}",
-            json_escape(&uuid),
-            json_escape(&password),
-            json_escape(&json_get_string(&protocol.settings_json, "congestionControl").unwrap_or_else(|| "bbr".to_string())),
-            tls
-        ),
+        "hysteria2" => {
+            let mut fields = vec![
+                common,
+                format!("\"users\":[{{\"password\":\"{}\"}}]", json_escape(&password)),
+            ];
+            if let Some(obfs_password) = protocol_setting(protocol, &["obfsPassword", "obfs_password"]) {
+                let obfs_type = protocol_setting(protocol, &["obfs", "obfsType"]).unwrap_or_else(|| "salamander".to_string());
+                fields.push(format!(
+                    "\"obfs\":{{\"type\":\"{}\",\"password\":\"{}\"}}",
+                    json_escape(&obfs_type),
+                    json_escape(&obfs_password)
+                ));
+            }
+            if let Some(masquerade) = protocol_setting(protocol, &["masquerade"]) {
+                fields.push(format!("\"masquerade\":\"{}\"", json_escape(&masquerade)));
+            }
+            fields.join(",") + &tls
+        }
+        "tuic" => {
+            let mut fields = vec![
+                common,
+                format!("\"users\":[{{\"uuid\":\"{}\",\"password\":\"{}\"}}]", json_escape(&uuid), json_escape(&password)),
+                format!(
+                    "\"congestion_control\":\"{}\"",
+                    json_escape(&protocol_setting(protocol, &["congestionControl", "congestion_control"]).unwrap_or_else(|| "bbr".to_string()))
+                ),
+            ];
+            if let Some(zero_rtt) = json_get_bool(&protocol.settings_json, "zeroRtt") {
+                fields.push(format!("\"zero_rtt_handshake\":{}", if zero_rtt { "true" } else { "false" }));
+            }
+            fields.join(",") + &tls
+        }
         "anytls" => format!("{common},\"users\":[{{\"password\":\"{}\"}}]{}", json_escape(&password), tls),
         other => return Err(format!("unsupported protocol type: {other}")),
     };
@@ -898,46 +1047,85 @@ fn protocol_inbound_json(protocol: &NodeProtocol, secret: &str) -> Result<String
 }
 
 fn protocol_transport_json(protocol: &NodeProtocol) -> String {
-    let transport = if !protocol.transport.is_empty() {
-        protocol.transport.clone()
-    } else if ["ws", "grpc"].contains(&protocol.variant.as_str()) {
-        protocol.variant.clone()
-    } else {
-        String::new()
-    };
+    let transport = protocol_transport_type(protocol);
     if transport.is_empty() {
         return String::new();
     }
     if transport == "grpc" {
-        return ",\"transport\":{\"type\":\"grpc\"}".to_string();
+        let service_name = protocol_setting(protocol, &["serviceName", "service_name"]).unwrap_or_else(|| "pulsedeck".to_string());
+        return format!(
+            ",\"transport\":{{\"type\":\"grpc\",\"service_name\":\"{}\"}}",
+            json_escape(&service_name)
+        );
     }
     if transport == "ws" {
-        return ",\"transport\":{\"type\":\"ws\",\"path\":\"/\"}".to_string();
+        let path = protocol_setting(protocol, &["path", "wsPath"]).unwrap_or_else(|| "/".to_string());
+        let mut fields = vec![
+            "\"type\":\"ws\"".to_string(),
+            format!("\"path\":\"{}\"", json_escape(&path)),
+        ];
+        if let Some(host) = protocol_setting(protocol, &["host", "wsHost"]) {
+            fields.push(format!("\"headers\":{{\"Host\":\"{}\"}}", json_escape(&host)));
+        }
+        if let Some(max_early_data) = json_get_number(&protocol.settings_json, "maxEarlyData") {
+            fields.push(format!("\"max_early_data\":{max_early_data}"));
+        }
+        return format!(",\"transport\":{{{}}}", fields.join(","));
     }
     format!(",\"transport\":{{\"type\":\"{}\"}}", json_escape(&transport))
 }
 
-fn protocol_tls_json(protocol: &NodeProtocol) -> String {
-    let wants_tls = protocol.security == "tls" || ["tls", "reality", "ech"].contains(&protocol.variant.as_str());
-    if !wants_tls {
-        return String::new();
+fn protocol_tls_json(protocol: &NodeProtocol, secret: &str) -> Result<String, String> {
+    let security = protocol_security(protocol);
+    if security.is_empty() {
+        return Ok(String::new());
     }
-    let server_name = json_get_string(&protocol.settings_json, "serverName").unwrap_or_default();
-    let certificate_path = json_get_string(&protocol.settings_json, "certificatePath")
-        .or_else(|| json_get_string(&protocol.settings_json, "certPath"))
-        .unwrap_or_default();
-    let key_path = json_get_string(&protocol.settings_json, "keyPath")
-        .or_else(|| json_get_string(&protocol.settings_json, "privateKeyPath"))
-        .unwrap_or_default();
+    let server_name = protocol_server_name(protocol);
+    let certificate_path = protocol_setting(protocol, &["certificatePath", "certPath"]).unwrap_or_default();
+    let key_path = protocol_setting(protocol, &["keyPath", "privateKeyPath"]).unwrap_or_default();
     let mut fields = vec!["\"enabled\":true".to_string()];
     if !server_name.is_empty() {
         fields.push(format!("\"server_name\":\"{}\"", json_escape(&server_name)));
     }
+    if let Some(alpn) = protocol_alpn(protocol) {
+        fields.push(format!("\"alpn\":{}", csv_array_json(&alpn)));
+    }
+    if let Some(min_version) = protocol_setting(protocol, &["minVersion", "min_version"]) {
+        fields.push(format!("\"min_version\":\"{}\"", json_escape(&min_version)));
+    }
+    if let Some(max_version) = protocol_setting(protocol, &["maxVersion", "max_version"]) {
+        fields.push(format!("\"max_version\":\"{}\"", json_escape(&max_version)));
+    }
+    if security == "reality" {
+        let private_key = protocol_setting(protocol, &["privateKey", "private_key", "realityPrivateKey"]).ok_or_else(|| {
+            format!("{} reality requires settings.privateKey generated by `sing-box generate reality-keypair`", protocol_display_name(&protocol.kind))
+        })?;
+        let handshake_server = protocol_setting(protocol, &["handshakeServer", "handshake", "dest", "serverName"])
+            .unwrap_or_else(|| "www.cloudflare.com".to_string());
+        let handshake_port = json_get_number(&protocol.settings_json, "handshakePort")
+            .or_else(|| json_get_number(&protocol.settings_json, "serverPort"))
+            .unwrap_or(443);
+        let short_id = protocol_reality_short_id(protocol, secret);
+        fields.push(format!(
+            "\"reality\":{{\"enabled\":true,\"handshake\":{{\"server\":\"{}\",\"server_port\":{}}},\"private_key\":\"{}\",\"short_id\":[\"{}\"]}}",
+            json_escape(&handshake_server),
+            handshake_port,
+            json_escape(&private_key),
+            json_escape(&short_id)
+        ));
+        return Ok(format!(",\"tls\":{{{}}}", fields.join(",")));
+    }
     if !certificate_path.is_empty() && !key_path.is_empty() {
         fields.push(format!("\"certificate_path\":\"{}\"", json_escape(&certificate_path)));
         fields.push(format!("\"key_path\":\"{}\"", json_escape(&key_path)));
+    } else {
+        return Err(format!(
+            "{} {} requires settings.certificatePath and settings.keyPath for TLS",
+            protocol_display_name(&protocol.kind),
+            if protocol.variant.is_empty() { protocol.security.as_str() } else { protocol.variant.as_str() }
+        ));
     }
-    format!(",\"tls\":{{{}}}", fields.join(","))
+    Ok(format!(",\"tls\":{{{}}}", fields.join(",")))
 }
 
 fn apply_sing_box_config(config_path: &str) -> Result<ApplyOutcome, String> {
@@ -1054,6 +1242,10 @@ fn protocol_link(protocol: &NodeProtocol, host: &str, secret: &str, node_name: &
     let host_part = link_host(host);
     let password = protocol_password(protocol, secret);
     let uuid = protocol_uuid(protocol, secret);
+    let transport = protocol_transport_type(protocol);
+    let security = protocol_security(protocol);
+    let server_name = protocol_server_name(protocol);
+    let alpn = protocol_alpn(protocol).unwrap_or_default();
     match protocol.kind.as_str() {
         "shadowsocks" => {
             let method = json_get_string(&protocol.settings_json, "method")
@@ -1063,20 +1255,79 @@ fn protocol_link(protocol: &NodeProtocol, host: &str, secret: &str, node_name: &
             format!("ss://{}@{}:{}#{}", userinfo, host_part, protocol.port, label)
         }
         "vmess" => {
+            let path = protocol_setting(protocol, &["path", "wsPath"]).unwrap_or_else(|| if transport == "ws" { "/".to_string() } else { String::new() });
+            let host_header = protocol_setting(protocol, &["host", "wsHost"]).unwrap_or_default();
             let body = format!(
-                "{{\"v\":\"2\",\"ps\":\"{}\",\"add\":\"{}\",\"port\":\"{}\",\"id\":\"{}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"/\",\"tls\":\"\"}}",
+                "{{\"v\":\"2\",\"ps\":\"{}\",\"add\":\"{}\",\"port\":\"{}\",\"id\":\"{}\",\"aid\":\"0\",\"net\":\"{}\",\"type\":\"none\",\"host\":\"{}\",\"path\":\"{}\",\"tls\":\"{}\",\"sni\":\"{}\",\"alpn\":\"{}\"}}",
                 json_escape(&format!("{} {}", node_name, protocol.name)),
                 json_escape(host),
                 protocol.port,
-                json_escape(&uuid)
+                json_escape(&uuid),
+                json_escape(if transport.is_empty() { "tcp" } else { &transport }),
+                json_escape(&host_header),
+                json_escape(&path),
+                json_escape(if security == "reality" { "tls" } else { &security }),
+                json_escape(&server_name),
+                json_escape(&alpn)
             );
             format!("vmess://{}", base64_encode(body.as_bytes()))
         }
-        "vless" => format!("vless://{}@{}:{}?encryption=none#{}", uuid, host_part, protocol.port, label),
-        "trojan" => format!("trojan://{}@{}:{}#{}", url_component(&password), host_part, protocol.port, label),
-        "hysteria2" => format!("hysteria2://{}@{}:{}#{}", url_component(&password), host_part, protocol.port, label),
-        "tuic" => format!("tuic://{}:{}@{}:{}#{}", uuid, url_component(&password), host_part, protocol.port, label),
-        "anytls" => format!("anytls://{}@{}:{}#{}", url_component(&password), host_part, protocol.port, label),
+        "vless" => {
+            let mut params = vec![
+                ("encryption", "none".to_string()),
+                ("security", security.clone()),
+                ("sni", server_name.clone()),
+                ("alpn", alpn.clone()),
+                ("type", if transport.is_empty() { "tcp".to_string() } else { transport.clone() }),
+                ("path", protocol_setting(protocol, &["path", "wsPath"]).unwrap_or_default()),
+                ("host", protocol_setting(protocol, &["host", "wsHost"]).unwrap_or_default()),
+                ("serviceName", protocol_setting(protocol, &["serviceName", "service_name"]).unwrap_or_default()),
+                ("flow", protocol_setting(protocol, &["flow"]).unwrap_or_default()),
+            ];
+            if security == "reality" {
+                params.push(("fp", protocol_setting(protocol, &["fingerprint", "fp"]).unwrap_or_else(|| "chrome".to_string())));
+                params.push(("pbk", protocol_setting(protocol, &["publicKey", "realityPublicKey", "pbk"]).unwrap_or_default()));
+                params.push(("sid", protocol_reality_short_id(protocol, secret)));
+            }
+            format!("vless://{}@{}:{}{}#{}", uuid, host_part, protocol.port, link_query(params), label)
+        }
+        "trojan" => {
+            let query = link_query(vec![
+                ("security", if security.is_empty() { "tls".to_string() } else { security.clone() }),
+                ("sni", server_name.clone()),
+                ("alpn", alpn.clone()),
+                ("type", transport.clone()),
+                ("path", protocol_setting(protocol, &["path", "wsPath"]).unwrap_or_default()),
+                ("host", protocol_setting(protocol, &["host", "wsHost"]).unwrap_or_default()),
+                ("serviceName", protocol_setting(protocol, &["serviceName", "service_name"]).unwrap_or_default()),
+            ]);
+            format!("trojan://{}@{}:{}{}#{}", url_component(&password), host_part, protocol.port, query, label)
+        }
+        "hysteria2" => {
+            let query = link_query(vec![
+                ("sni", server_name.clone()),
+                ("alpn", alpn.clone()),
+                ("obfs", protocol_setting(protocol, &["obfs", "obfsType"]).unwrap_or_default()),
+                ("obfs-password", protocol_setting(protocol, &["obfsPassword", "obfs_password"]).unwrap_or_default()),
+            ]);
+            format!("hysteria2://{}@{}:{}{}#{}", url_component(&password), host_part, protocol.port, query, label)
+        }
+        "tuic" => {
+            let query = link_query(vec![
+                ("sni", server_name.clone()),
+                ("alpn", alpn.clone()),
+                ("congestion_control", protocol_setting(protocol, &["congestionControl", "congestion_control"]).unwrap_or_else(|| "bbr".to_string())),
+            ]);
+            format!("tuic://{}:{}@{}:{}{}#{}", uuid, url_component(&password), host_part, protocol.port, query, label)
+        }
+        "anytls" => {
+            let query = link_query(vec![
+                ("sni", server_name.clone()),
+                ("alpn", alpn.clone()),
+                ("security", if security.is_empty() { "tls".to_string() } else { security.clone() }),
+            ]);
+            format!("anytls://{}@{}:{}{}#{}", url_component(&password), host_part, protocol.port, query, label)
+        }
         _ => format!("{}://{}:{}", protocol.kind, host_part, protocol.port),
     }
 }
@@ -1334,6 +1585,95 @@ fn make_executable(path: &Path) -> Result<(), String> {
         fs::set_permissions(path, permissions).map_err(|error| format!("cannot chmod {}: {error}", path.display()))?;
     }
     Ok(())
+}
+
+fn protocol_setting(protocol: &NodeProtocol, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(value) = json_get_string(&protocol.settings_json, key) {
+            let trimmed = value.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
+}
+
+fn protocol_transport_type(protocol: &NodeProtocol) -> String {
+    if !protocol.transport.trim().is_empty() {
+        return protocol.transport.trim().to_string();
+    }
+    if ["ws", "grpc", "http", "httpupgrade"].contains(&protocol.variant.as_str()) {
+        return protocol.variant.clone();
+    }
+    protocol_setting(protocol, &["transport", "network"]).unwrap_or_default()
+}
+
+fn protocol_security(protocol: &NodeProtocol) -> String {
+    let raw = if !protocol.security.trim().is_empty() {
+        protocol.security.trim().to_string()
+    } else if ["tls", "reality", "ech"].contains(&protocol.variant.as_str()) {
+        protocol.variant.clone()
+    } else if ["hysteria2", "tuic", "anytls"].contains(&protocol.kind.as_str()) {
+        "tls".to_string()
+    } else {
+        protocol_setting(protocol, &["security"]).unwrap_or_default()
+    };
+    match raw.as_str() {
+        "none" | "plain" | "off" => String::new(),
+        "reality" => "reality".to_string(),
+        "ech" | "tls" => "tls".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn protocol_server_name(protocol: &NodeProtocol) -> String {
+    protocol_setting(protocol, &["serverName", "sni", "host", "wsHost"]).unwrap_or_default()
+}
+
+fn protocol_alpn(protocol: &NodeProtocol) -> Option<String> {
+    if let Some(alpn) = protocol_setting(protocol, &["alpn"]) {
+        return Some(alpn);
+    }
+    if ["hysteria2", "tuic"].contains(&protocol.kind.as_str()) {
+        return Some("h3".to_string());
+    }
+    if protocol_transport_type(protocol) == "grpc" {
+        return Some("h2".to_string());
+    }
+    None
+}
+
+fn protocol_reality_short_id(protocol: &NodeProtocol, secret: &str) -> String {
+    protocol_setting(protocol, &["shortId", "short_id", "sid"]).unwrap_or_else(|| {
+        pseudo_uuid(&format!("{}:{}:reality-short-id", secret, protocol.id))
+            .chars()
+            .filter(|ch| ch.is_ascii_hexdigit())
+            .take(8)
+            .collect()
+    })
+}
+
+fn csv_array_json(input: &str) -> String {
+    let values = input
+        .split(',')
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<String>>();
+    string_array_json(&values)
+}
+
+fn link_query(params: Vec<(&str, String)>) -> String {
+    let pairs = params
+        .into_iter()
+        .filter(|(_, value)| !value.trim().is_empty())
+        .map(|(key, value)| format!("{key}={}", url_component(&value)))
+        .collect::<Vec<String>>();
+    if pairs.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", pairs.join("&"))
+    }
 }
 
 fn protocol_display_name(kind: &str) -> &'static str {

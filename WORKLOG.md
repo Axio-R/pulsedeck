@@ -76,14 +76,36 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 - [x] Replace Node Agent with GHCR-built Rust Agent binaries.
 - [x] Add protocol/network/traffic/alert control-plane model for the target sing-box panel.
 - [x] Implement first real Rust Agent sing-box executor for protocol add/delete, link reset, and sing-box install/update.
-- [ ] Harden sing-box protocol templates for TLS/Reality/Hysteria2/Tuic/AnyTLS production variants and signed release selection.
+- [x] Harden sing-box protocol templates for TLS/Reality/Hysteria2/Tuic/AnyTLS production variants and versioned/checksummed release selection.
 - [x] Integrate local GeoIP/Geosite database files instead of placeholder region lookup.
 - [x] Add SSE command output streaming.
-- [ ] Add WebSocket real-time traffic push.
+- [x] Add WebSocket real-time traffic push.
 
 ## Log
 
 ### 2026-06-07
+
+- Implementation direction for this turn:
+  - Continue the remaining worklog items after command streaming and GeoIP/Geosite.
+  - Add browser-facing WebSocket real-time traffic push without adding a backend dependency.
+  - Harden the Rust Agent sing-box templates so production TLS/Reality/Hysteria2/Tuic/AnyTLS variants fail clearly when required key material is missing.
+  - Improve sing-box install/update so official versioned release tarballs can be selected and extracted, with optional SHA-256 verification.
+- Implementation completed in this turn:
+  - Added authenticated WebSocket endpoint `GET /api/v1/traffic/stream?token=...` using the existing Node `http` server upgrade path.
+  - Added traffic snapshots and heartbeat frames over WebSocket, with broadcasts after Agent enroll, heartbeat, metrics, diagnostics, and node/protocol state changes.
+  - Added per-node traffic delta and rate fields: `lastDeltaRxBytes`, `lastDeltaTxBytes`, `rxRateBytesPerSecond`, and `txRateBytesPerSecond`.
+  - Updated the Nodes UI to subscribe to the traffic WebSocket, reconnect after transient disconnects, merge live node metrics/status/traffic, and display real-time RX/TX rates.
+  - Added an advanced protocol settings JSON input in the Nodes UI so SNI, cert paths, Reality keys, WS paths, gRPC service names, obfs settings, and similar protocol options can be passed through to the Agent.
+  - Hardened Rust Agent sing-box inbound templates for WS/gRPC transport settings, TLS certificate/key requirements, Reality private key/handshake/short-id settings, VMess TLS, Hysteria2 obfs/masquerade, Tuic congestion/zero-RTT, and AnyTLS TLS handling.
+  - Updated generated subscription links for VMess, VLESS, Trojan, Hysteria2, Tuic, and AnyTLS to include transport, SNI, ALPN, Reality, WS, gRPC, obfs, and congestion parameters when present.
+  - Extended `sing-box-install` / `sing-box-reinstall` so the Agent can use `payload.version` or `PULSEDECK_SING_BOX_VERSION` to select official `SagerNet/sing-box` Linux release tarballs for amd64/arm64/armv7/386, extract the embedded binary, and optionally verify `payload.sha256` / `PULSEDECK_SING_BOX_SHA256`.
+- Local verification after WebSocket traffic and sing-box hardening:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 9 tests, including a WebSocket traffic push test.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: could not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+  - No local Docker image build was performed.
 
 - Implementation direction for this turn:
   - Continue remaining product features after the first sing-box executor.

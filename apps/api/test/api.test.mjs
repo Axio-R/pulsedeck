@@ -30,6 +30,63 @@ async function request(base, path, options = {}) {
   return { res, body };
 }
 
+async function openWebSocket(base, path) {
+  const url = new URL(path, base);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  const socket = new WebSocket(url);
+  const messages = [];
+  let waiter = null;
+  socket.addEventListener('message', (event) => {
+    const message = JSON.parse(String(event.data));
+    if (waiter) {
+      const resolve = waiter;
+      waiter = null;
+      resolve(message);
+    } else {
+      messages.push(message);
+    }
+  });
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('websocket open timed out')), 2000);
+    socket.addEventListener(
+      'open',
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true }
+    );
+    socket.addEventListener(
+      'error',
+      () => {
+        clearTimeout(timer);
+        reject(new Error('websocket open failed'));
+      },
+      { once: true }
+    );
+  });
+
+  return {
+    socket,
+    close: () => socket.close(),
+    readJson: () =>
+      new Promise((resolve, reject) => {
+        if (messages.length) {
+          resolve(messages.shift());
+          return;
+        }
+        const timer = setTimeout(() => {
+          waiter = null;
+          reject(new Error('websocket frame timed out'));
+        }, 2000);
+        waiter = (message) => {
+          clearTimeout(timer);
+          resolve(message);
+        };
+      })
+  };
+}
+
 test('health reports PulseDeck on default product port', async () => {
   const app = await startServer();
   try {
@@ -347,6 +404,77 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.deepEqual(patchedPolicy.body.trafficChannels, ['email']);
     assert.equal(patchedPolicy.body.autoDisableOnTrafficLimit, false);
   } finally {
+    await app.close();
+  }
+});
+
+test('traffic websocket streams live node traffic snapshots', async () => {
+  const app = await startServer();
+  let ws;
+  try {
+    const login = await request(app.base, '/api/v1/auth/login', {
+      method: 'POST',
+      body: { username: 'admin', password: 'change-me' }
+    });
+    const auth = { authorization: `Bearer ${login.body.token}` };
+
+    const created = await request(app.base, '/api/v1/nodes', {
+      method: 'POST',
+      headers: auth,
+      body: { name: 'traffic-node' }
+    });
+    const agentEnroll = await request(app.base, `/api/v1/agents/enroll/${created.body.installId}`, {
+      method: 'POST',
+      body: {
+        version: '0.1.0-rust',
+        platform: 'linux',
+        arch: 'x86_64',
+        serviceMode: 'manual'
+      }
+    });
+
+    ws = await openWebSocket(app.base, `/api/v1/traffic/stream?token=${login.body.token}`);
+    const initial = await ws.readJson();
+    assert.equal(initial.type, 'traffic.snapshot');
+    assert.ok(initial.items.some((item) => item.id === created.body.id));
+
+    const agentAuth = { authorization: `Bearer ${agentEnroll.body.token}` };
+    await request(app.base, `/api/v1/agents/${agentEnroll.body.agentId}/metrics`, {
+      method: 'POST',
+      headers: agentAuth,
+      body: {
+        metrics: {
+          cpu: { usagePercent: 12 },
+          memory: { usagePercent: 34 },
+          network: { interfaces: [{ name: 'eth0', rxBytes: 1000, txBytes: 2000 }] }
+        }
+      }
+    });
+    const firstPush = await ws.readJson();
+    const firstNode = firstPush.items.find((item) => item.id === created.body.id);
+    assert.equal(firstPush.type, 'traffic.snapshot');
+    assert.equal(firstNode.metrics.cpu.usagePercent, 12);
+    assert.equal(firstNode.traffic.lastRxBytes, 1000);
+
+    await request(app.base, `/api/v1/agents/${agentEnroll.body.agentId}/metrics`, {
+      method: 'POST',
+      headers: agentAuth,
+      body: {
+        metrics: {
+          cpu: { usagePercent: 18 },
+          memory: { usagePercent: 40 },
+          network: { interfaces: [{ name: 'eth0', rxBytes: 2500, txBytes: 4500 }] }
+        }
+      }
+    });
+    const secondPush = await ws.readJson();
+    const secondNode = secondPush.items.find((item) => item.id === created.body.id);
+    assert.equal(secondNode.traffic.lastDeltaRxBytes, 1500);
+    assert.equal(secondNode.traffic.lastDeltaTxBytes, 2500);
+    assert.equal(secondNode.traffic.rxRateBytesPerSecond, 1500);
+    assert.equal(secondNode.traffic.txRateBytesPerSecond, 2500);
+  } finally {
+    ws?.close();
     await app.close();
   }
 });

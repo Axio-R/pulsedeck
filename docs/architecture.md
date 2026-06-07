@@ -33,6 +33,7 @@ Near-term architecture targets:
 - Node create/list/delete with related Agent and command cleanup.
 - Node protocol management for VMess, VLESS, Trojan, Shadowsocks, Hysteria2, Tuic, AnyTLS, and variants.
 - Automatic IP mode classification from Agent-reported addresses.
-- Agent WebSocket channel for real-time heartbeat, traffic samples, and remote command dispatch.
+- Browser WebSocket endpoint for live node traffic snapshots and RX/TX rates.
 - Browser SSE endpoint for streamed command output.
+- Future Agent WebSocket channel for real-time heartbeat, traffic samples, and remote command dispatch.
 - Recent traffic rates in memory, cumulative traffic persisted, and optional SQLite only after the JSON store becomes a bottleneck.
