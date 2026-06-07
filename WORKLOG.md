@@ -96,7 +96,7 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - Updated Rust Agent `pk update-check` to report panel runtime version, size, SHA-256, endpoint, and update status; updated `pk update` to verify SHA-256 before replacing the local binary.
   - Reworked the Settings page into a compact runtime status panel with live health/version data and target download rows.
   - Bumped panel and Agent metadata to `0.2.2` / `0.2.2-rust`.
-  - Initial `v0.2.1` tag pushed successfully and panel image tag build passed, but Agent release run `27084362477` failed because `rust:1.87-alpine` no longer provided `rustup`/`cargo` in that Docker run context.
+  - Initial `v0.2.1` tag pushed successfully and panel image tag build passed, but Agent release run `27084362477` failed with missing `rustup`/`cargo`; later confirmed the root cause was the workflow's login shell resetting PATH.
   - Fixed Agent build infrastructure by switching both the panel Dockerfile Agent build stage and Agent release workflow to `rust:1.87-bookworm`, then moved forward with `v0.2.2` instead of force-moving the already-pushed `v0.2.1` tag.
   - `v0.2.2` Agent release run `27084588013` then exposed the actual workflow issue: `docker run ... sh -lc` starts a login shell and resets PATH so `/usr/local/cargo/bin` is hidden. Changed the release workflow to `sh -c`; the existing `v0.2.2` tag will be released through workflow dispatch instead of moving the tag.
 - Local verification before commit:
@@ -106,6 +106,26 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
   - `corepack pnpm build`: passed.
   - `git diff --check`: passed.
   - `cargo check --manifest-path apps/agent/Cargo.toml`: could not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+- Committed and pushed:
+  - `0726244 Add agent runtime manifest verification`
+  - `aa3b102 Fix agent release build image`
+  - `8c7167c Fix agent release shell path`
+- GitHub Actions and release:
+  - Main panel image runs `27084057213`, `27084526326`, and `27084706712`: completed successfully and published `ghcr.io/axio-r/pulsedeck:latest`.
+  - Tag `v0.2.1`: panel image run `27084362473` succeeded; Agent release run `27084362477` failed and was superseded by `v0.2.2`.
+  - Tag `v0.2.2`: panel image run `27084588027` succeeded; initial Agent release run `27084588013` failed due `sh -lc` PATH reset.
+  - Workflow dispatch run `27084723697` for `release_tag=v0.2.2`: completed successfully and published the GitHub release assets.
+  - Published Agent release assets: `pulsedeck-agent-v0.2.2-linux-x64.tar.gz` 371220 bytes, `pulsedeck-agent-v0.2.2-linux-arm64.tar.gz` 348076 bytes, `pulsedeck-agent-v0.2.2-linux-armv7l.tar.gz` 342496 bytes, and `SHA256SUMS` 323 bytes.
+- Deployment after `v0.2.2`:
+  - `docker compose pull`: pulled the fresh GHCR image; no local Docker image build was performed.
+  - `docker compose up -d`: recreated and started `pulsedeck-panel`.
+  - `docker compose ps`: `pulsedeck-panel` is `Up` with `0.0.0.0:14770->14770/tcp` and `[::]:14770->14770/tcp`.
+  - `GET http://127.0.0.1:14770/api/v1/health`: passed with `version: 0.2.2` and `agentVersion: 0.2.2-rust`.
+- Post-deploy smoke passed against the Compose deployment:
+  - Login with `admin / change-me` succeeded.
+  - Runtime manifest reported all three targets available, and downloaded runtime SHA-256 values matched the manifest.
+  - Runtime byte checks: `linux-x64` 770512 bytes, `linux-arm64` 649400 bytes, and `linux-armv7l` 683504 bytes.
+  - Created a temporary smoke node, verified the generated install script includes runtime manifest lookup, `verify_sha256`, checksum success output, atomic replacement through `install_agent_binary`, and `mv -f "$next" "$target"`, then deleted the smoke node.
 
 - Implementation direction for this turn:
   - Continue remaining product work by closing the alerting loop.
