@@ -487,6 +487,117 @@ test('traffic websocket streams live node traffic snapshots', async () => {
   }
 });
 
+test('alert policy detects offline nodes and traffic limit actions', async () => {
+  const app = await startServer();
+  try {
+    const login = await request(app.base, '/api/v1/auth/login', {
+      method: 'POST',
+      body: { username: 'admin', password: 'change-me' }
+    });
+    const auth = { authorization: `Bearer ${login.body.token}` };
+
+    const policy = await request(app.base, '/api/v1/alert-policy', {
+      method: 'PATCH',
+      headers: auth,
+      body: {
+        offlineAfterSeconds: 1,
+        offlineChannels: ['telegram', 'email'],
+        trafficChannels: ['telegram', 'email'],
+        autoDisableOnTrafficLimit: true,
+        trafficLimitAction: 'disable-node-subscription'
+      }
+    });
+    assert.equal(policy.res.status, 200);
+    assert.equal(policy.body.offlineAfterSeconds, 1);
+    assert.equal(policy.body.trafficLimitAction, 'disable-node-subscription');
+
+    const created = await request(app.base, '/api/v1/nodes', {
+      method: 'POST',
+      headers: auth,
+      body: {
+        name: 'alert-node',
+        traffic: {
+          thresholdBytes: 1000,
+          warningPercent: 50
+        }
+      }
+    });
+    const enrolled = await request(app.base, `/api/v1/agents/enroll/${created.body.installId}`, {
+      method: 'POST',
+      body: {
+        version: '0.1.0-rust',
+        platform: 'linux',
+        arch: 'x86_64',
+        serviceMode: 'manual'
+      }
+    });
+    assert.equal(enrolled.res.status, 200);
+    const agentAuth = { authorization: `Bearer ${enrolled.body.token}` };
+
+    await request(app.base, `/api/v1/agents/${enrolled.body.agentId}/metrics`, {
+      method: 'POST',
+      headers: agentAuth,
+      body: {
+        metrics: {
+          network: { interfaces: [{ name: 'eth0', rxBytes: 100, txBytes: 100 }] }
+        }
+      }
+    });
+    await request(app.base, `/api/v1/agents/${enrolled.body.agentId}/metrics`, {
+      method: 'POST',
+      headers: agentAuth,
+      body: {
+        metrics: {
+          network: { interfaces: [{ name: 'eth0', rxBytes: 900, txBytes: 900 }] }
+        }
+      }
+    });
+
+    const afterTraffic = await request(app.base, '/api/v1/nodes', { headers: auth });
+    const trafficNode = afterTraffic.body.items.find((node) => node.id === created.body.id);
+    assert.equal(trafficNode.subscriptionEnabled, false);
+    assert.equal(trafficNode.traffic.thresholdExceededAt !== null, true);
+    assert.equal(trafficNode.alertState.trafficThresholdAlertedAt !== null, true);
+
+    let events = await request(app.base, '/api/v1/alert-events', { headers: auth });
+    assert.equal(events.res.status, 200);
+    const thresholdEvent = events.body.items.find((event) => event.nodeId === created.body.id && event.type === 'traffic-threshold');
+    assert.ok(thresholdEvent);
+    assert.equal(thresholdEvent.status, 'skipped');
+    assert.ok(thresholdEvent.actions.some((action) => action.type === 'disable-node-subscription' && action.status === 'completed'));
+    assert.ok(thresholdEvent.deliveries.every((delivery) => delivery.status === 'skipped'));
+
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const offlineCheck = await request(app.base, '/api/v1/alerts/check', {
+      method: 'POST',
+      headers: auth
+    });
+    assert.equal(offlineCheck.res.status, 200);
+    assert.equal(offlineCheck.body.offlineNodes, 1);
+    assert.equal(offlineCheck.body.createdEvents, 1);
+
+    events = await request(app.base, '/api/v1/alert-events', { headers: auth });
+    const offlineEvent = events.body.items.find((event) => event.nodeId === created.body.id && event.type === 'node-offline');
+    assert.ok(offlineEvent);
+    const ack = await request(app.base, `/api/v1/alert-events/${offlineEvent.id}/ack`, {
+      method: 'POST',
+      headers: auth
+    });
+    assert.equal(ack.res.status, 200);
+    assert.equal(ack.body.status, 'acknowledged');
+
+    await request(app.base, `/api/v1/agents/${enrolled.body.agentId}/heartbeat`, {
+      method: 'POST',
+      headers: agentAuth,
+      body: { status: 'online' }
+    });
+    events = await request(app.base, '/api/v1/alert-events', { headers: auth });
+    assert.ok(events.body.items.some((event) => event.nodeId === created.body.id && event.type === 'node-recovered'));
+  } finally {
+    await app.close();
+  }
+});
+
 test('soybean auth contract returns wrapped login token and user info', async () => {
   const app = await startServer();
   try {

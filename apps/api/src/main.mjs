@@ -2,6 +2,7 @@ import http from 'node:http';
 import { createReadStream, readFileSync, statSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import net from 'node:net';
+import tls from 'node:tls';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
@@ -16,6 +17,7 @@ const DEFAULT_GEOIP_FILE = path.join(ROOT_DIR, 'geoip.json');
 const DEFAULT_GEOSITE_FILE = path.join(ROOT_DIR, 'geosite.json');
 const PORT = Number(process.env.PULSEDECK_PORT || 14770);
 const HOST = process.env.PULSEDECK_HOST || '0.0.0.0';
+const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.0';
 const ADMIN_USER = process.env.PULSEDECK_ADMIN_USER || 'admin';
 const ADMIN_PASSWORD = process.env.PULSEDECK_ADMIN_PASSWORD || 'change-me';
 
@@ -90,6 +92,14 @@ function isRecent(iso, maxAgeMs = 180_000) {
   return Number.isFinite(ts) && Date.now() - ts <= maxAgeMs;
 }
 
+function offlineAfterMs(data) {
+  return Math.max(Number(data.alertPolicy?.offlineAfterSeconds) || 180, 1) * 1000;
+}
+
+function isNodeOnline(node, data) {
+  return isRecent(node.lastSeenAt, offlineAfterMs(data));
+}
+
 function requireUser(req, data, url) {
   const token = bearerToken(req) || url?.searchParams?.get('token') || '';
   if (!token) return null;
@@ -121,10 +131,10 @@ function presentProfile(profile, req) {
   };
 }
 
-function presentNode(node, req) {
+function presentNode(node, req, data) {
   return {
     ...node,
-    online: isRecent(node.lastSeenAt),
+    online: isNodeOnline(node, data),
     displayRegion: node.region || node.network?.detectedRegion || '自动识别中',
     installCommand: `curl -fsSL '${publicBaseUrl(req)}/api/v1/agents/install/${encodeURIComponent(node.installId)}' | sh`
   };
@@ -152,7 +162,7 @@ function presentAgentCommand(command, node) {
 }
 
 function dashboard(data) {
-  const onlineNodes = data.nodes.filter((node) => isRecent(node.lastSeenAt));
+  const onlineNodes = data.nodes.filter((node) => isNodeOnline(node, data));
   const warningNodes = data.nodes.filter((node) => node.status === 'warning' || node.agentStatus === 'degraded');
   const queuedCommands = data.commands.filter((command) => ['queued', 'running'].includes(command.status));
   const cpuValues = onlineNodes
@@ -429,7 +439,7 @@ function trafficSnapshot(data) {
       name: node.name,
       status: node.status,
       agentStatus: node.agentStatus,
-      online: isRecent(node.lastSeenAt),
+      online: isNodeOnline(node, data),
       lastSeenAt: node.lastSeenAt,
       region: node.region,
       displayRegion: node.region || node.network?.detectedRegion || '自动识别中',
@@ -443,13 +453,341 @@ function trafficSnapshot(data) {
 
 function addAlertEvent(data, event) {
   data.alertEvents ||= [];
-  data.alertEvents.push({
+  const channels = [...new Set((Array.isArray(event.channels) ? event.channels : []).map((item) => String(item)).filter(Boolean))];
+  if (event.dedupeKey && data.alertEvents.some((item) => item.dedupeKey === event.dedupeKey)) {
+    return data.alertEvents.find((item) => item.dedupeKey === event.dedupeKey);
+  }
+  const alert = {
     id: randomUUID(),
     status: 'pending',
+    channels,
+    deliveries: channels.map((channel) => deliveryPlan(data, channel)),
+    actions: Array.isArray(event.actions) ? event.actions : [],
+    acknowledgedAt: null,
+    resolvedAt: event.resolvedAt || null,
     createdAt: nowIso(),
     updatedAt: nowIso(),
     ...event
+  };
+  alert.channels = channels;
+  refreshAlertStatus(alert);
+  data.alertEvents.push(alert);
+  if (data.alertEvents.length > 1000) data.alertEvents = data.alertEvents.slice(-1000);
+  return alert;
+}
+
+function deliveryPlan(data, channelName) {
+  const channel = String(channelName || '').trim();
+  const timestamp = nowIso();
+  if (channel === 'telegram') {
+    const config = data.notificationChannels?.telegram || {};
+    const ready = config.enabled === true && Boolean(config.botToken) && Boolean(config.chatId);
+    return {
+      channel,
+      status: ready ? 'pending' : 'skipped',
+      detail: ready ? 'Telegram channel configured' : 'Telegram channel is disabled or incomplete',
+      updatedAt: timestamp
+    };
+  }
+  if (channel === 'email') {
+    const config = data.notificationChannels?.email || {};
+    const ready = config.enabled === true && Boolean(config.smtpHost) && Boolean(config.from) && Boolean(config.to);
+    return {
+      channel,
+      status: ready ? 'pending' : 'skipped',
+      detail: ready ? 'SMTP channel configured' : 'Email channel is disabled or incomplete',
+      updatedAt: timestamp
+    };
+  }
+  return {
+    channel,
+    status: 'skipped',
+    detail: 'Unknown notification channel',
+    updatedAt: timestamp
+  };
+}
+
+function refreshAlertStatus(event) {
+  const deliveries = Array.isArray(event.deliveries) ? event.deliveries : [];
+  if (event.acknowledgedAt) {
+    event.status = 'acknowledged';
+    return event.status;
+  }
+  if (!deliveries.length || deliveries.every((delivery) => delivery.status === 'skipped')) {
+    event.status = 'skipped';
+    return event.status;
+  }
+  if (deliveries.some((delivery) => delivery.status === 'pending')) {
+    event.status = 'pending';
+    return event.status;
+  }
+  if (deliveries.some((delivery) => delivery.status === 'delivered')) {
+    event.status = 'delivered';
+    return event.status;
+  }
+  event.status = deliveries.some((delivery) => delivery.status === 'failed') ? 'failed' : 'skipped';
+  return event.status;
+}
+
+function alertSubject(event) {
+  const level = event.level === 'critical' ? 'CRITICAL' : event.level === 'warning' ? 'WARNING' : 'INFO';
+  return `[PulseDeck] ${level} ${event.type || 'alert'}`;
+}
+
+function alertBody(event) {
+  return [
+    alertSubject(event),
+    '',
+    event.message || '',
+    event.nodeId ? `Node: ${event.nodeId}` : '',
+    event.createdAt ? `Time: ${event.createdAt}` : ''
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+async function deliverAlert(event, delivery, channels) {
+  if (delivery.channel === 'telegram') {
+    const config = channels.telegram || {};
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          chat_id: config.chatId,
+          text: alertBody(event),
+          parse_mode: config.parseMode || 'HTML',
+          disable_web_page_preview: true
+        })
+      });
+      const text = await response.text();
+      if (!response.ok) throw new Error(text || `Telegram API ${response.status}`);
+      return 'Telegram message delivered';
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  if (delivery.channel === 'email') {
+    await sendSmtpMail(channels.email || {}, alertSubject(event), alertBody(event));
+    return 'SMTP message delivered';
+  }
+
+  throw new Error('unknown notification channel');
+}
+
+function smtpEncodeHeader(value) {
+  const text = String(value || '').replace(/[\r\n]+/g, ' ').trim();
+  return /^[\x20-\x7e]*$/.test(text) ? text : `=?UTF-8?B?${Buffer.from(text, 'utf8').toString('base64')}?=`;
+}
+
+function smtpRecipients(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => smtpAddress(item))
+    .filter(Boolean);
+}
+
+function smtpAddress(value) {
+  return String(value || '')
+    .replace(/[\r\n<>]/g, '')
+    .trim();
+}
+
+function waitForSocket(socket, event) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      socket.off(event, onEvent);
+      socket.off('error', onError);
+      socket.off('timeout', onTimeout);
+    };
+    const onEvent = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onTimeout = () => {
+      cleanup();
+      reject(new Error('SMTP socket timed out'));
+    };
+    socket.once(event, onEvent);
+    socket.once('error', onError);
+    socket.once('timeout', onTimeout);
   });
+}
+
+function readSmtpResponse(socket) {
+  return new Promise((resolve, reject) => {
+    let buffer = '';
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('SMTP response timed out'));
+    }, 5000);
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off('data', onData);
+      socket.off('error', onError);
+      socket.off('timeout', onTimeout);
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onTimeout = () => {
+      cleanup();
+      reject(new Error('SMTP response timed out'));
+    };
+    const onData = (chunk) => {
+      buffer += chunk.toString('utf8');
+      const lines = buffer.split(/\r?\n/).filter(Boolean);
+      const last = lines[lines.length - 1] || '';
+      const match = /^(\d{3})\s/.exec(last);
+      if (!match) return;
+      cleanup();
+      resolve({ code: Number(match[1]), text: lines.join('\n') });
+    };
+    socket.on('data', onData);
+    socket.once('error', onError);
+    socket.once('timeout', onTimeout);
+  });
+}
+
+async function smtpCommand(socket, command, expected = [250]) {
+  socket.write(`${command}\r\n`);
+  const response = await readSmtpResponse(socket);
+  if (!expected.includes(response.code)) throw new Error(`SMTP command failed (${response.code}): ${response.text}`);
+  return response;
+}
+
+async function sendSmtpMail(config, subject, body) {
+  const host = String(config.smtpHost || '').trim();
+  const port = Number(config.smtpPort) || 587;
+  const recipients = smtpRecipients(config.to);
+  const from = smtpAddress(config.from);
+  if (!host || !from || recipients.length === 0) throw new Error('SMTP channel is incomplete');
+  let socket = port === 465 ? tls.connect({ host, port, servername: host, timeout: 5000 }) : net.createConnection({ host, port, timeout: 5000 });
+  socket.setEncoding('utf8');
+  await waitForSocket(socket, port === 465 ? 'secureConnect' : 'connect');
+  let response = await readSmtpResponse(socket);
+  if (response.code !== 220) throw new Error(`SMTP banner failed (${response.code}): ${response.text}`);
+
+  response = await smtpCommand(socket, 'EHLO pulsedeck.local');
+  if (port !== 465 && /STARTTLS/im.test(response.text)) {
+    await smtpCommand(socket, 'STARTTLS', [220]);
+    socket = tls.connect({ socket, servername: host, timeout: 5000 });
+    socket.setEncoding('utf8');
+    await waitForSocket(socket, 'secureConnect');
+    await smtpCommand(socket, 'EHLO pulsedeck.local');
+  }
+
+  if (config.username && config.password) {
+    await smtpCommand(socket, 'AUTH LOGIN', [334]);
+    await smtpCommand(socket, Buffer.from(String(config.username), 'utf8').toString('base64'), [334]);
+    await smtpCommand(socket, Buffer.from(String(config.password), 'utf8').toString('base64'), [235]);
+  }
+
+  await smtpCommand(socket, `MAIL FROM:<${from}>`);
+  for (const recipient of recipients) await smtpCommand(socket, `RCPT TO:<${recipient}>`, [250, 251]);
+  await smtpCommand(socket, 'DATA', [354]);
+  const message = [
+    `From: ${smtpEncodeHeader(from)}`,
+    `To: ${smtpEncodeHeader(recipients.join(', '))}`,
+    `Subject: ${smtpEncodeHeader(subject)}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=UTF-8',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    body.replace(/^\./gm, '..')
+  ].join('\r\n');
+  socket.write(`${message}\r\n.\r\n`);
+  response = await readSmtpResponse(socket);
+  if (response.code !== 250) throw new Error(`SMTP DATA failed (${response.code}): ${response.text}`);
+  socket.write('QUIT\r\n');
+  socket.end();
+}
+
+async function dispatchPendingAlertEvents(store) {
+  if (!(store.data.alertEvents || []).some((event) => (event.deliveries || []).some((delivery) => delivery.status === 'pending'))) return;
+  await store.update(async (draft) => {
+    for (const event of draft.alertEvents || []) {
+      for (const delivery of event.deliveries || []) {
+        if (delivery.status !== 'pending') continue;
+        try {
+          delivery.detail = await deliverAlert(event, delivery, draft.notificationChannels || {});
+          delivery.status = 'delivered';
+        } catch (error) {
+          delivery.status = 'failed';
+          delivery.detail = error.message || 'delivery failed';
+        }
+        delivery.updatedAt = nowIso();
+        event.updatedAt = delivery.updatedAt;
+      }
+      refreshAlertStatus(event);
+    }
+  });
+}
+
+function trafficLimitAction(data, node, traffic) {
+  if (traffic.autoDisableSubscription || node.alertPolicy?.autoDisableOnTrafficLimit) return 'disable-node-subscription';
+  const policy = data.alertPolicy || {};
+  if (policy.autoDisableOnTrafficLimit !== true) return 'keep-node';
+  return policy.trafficLimitAction || 'disable-node-subscription';
+}
+
+function applyTrafficLimitAction(data, node, action) {
+  const timestamp = nowIso();
+  if (action === 'disable-node-subscription') {
+    const changed = node.subscriptionEnabled !== false;
+    node.subscriptionEnabled = false;
+    return [
+      {
+        type: 'disable-node-subscription',
+        status: changed ? 'completed' : 'skipped',
+        detail: changed ? 'Node subscription output disabled' : 'Node subscription output was already disabled',
+        updatedAt: timestamp
+      }
+    ];
+  }
+  if (action === 'disable-all-subscriptions') {
+    const disabledProfiles = [];
+    for (const profile of data.subscriptionProfiles || []) {
+      if (profile.enabled) {
+        profile.enabled = false;
+        profile.updatedAt = timestamp;
+        disabledProfiles.push(profile.id);
+      }
+    }
+    node.subscriptionEnabled = false;
+    return [
+      {
+        type: 'disable-node-subscription',
+        status: 'completed',
+        detail: 'Node subscription output disabled',
+        updatedAt: timestamp
+      },
+      {
+        type: 'disable-all-subscriptions',
+        status: disabledProfiles.length ? 'completed' : 'skipped',
+        detail: disabledProfiles.length ? `Disabled ${disabledProfiles.length} subscription profiles` : 'All subscription profiles were already disabled',
+        profileIds: disabledProfiles,
+        updatedAt: timestamp
+      }
+    ];
+  }
+  return [
+    {
+      type: 'keep-node',
+      status: 'skipped',
+      detail: 'Traffic limit action is disabled',
+      updatedAt: timestamp
+    }
+  ];
 }
 
 function updateTrafficAccounting(data, node, metrics) {
@@ -474,20 +812,96 @@ function updateTrafficAccounting(data, node, metrics) {
   traffic.txRateBytesPerSecond = elapsedSeconds ? Math.round(deltaTx / elapsedSeconds) : 0;
   traffic.updatedAt = nowIso();
   const threshold = Number(traffic.thresholdBytes) || 0;
+  node.alertState ||= {};
+  const warningPercent = Math.min(Math.max(Number(traffic.warningPercent) || 80, 1), 100);
+  const warningBytes = threshold > 0 ? Math.floor((threshold * warningPercent) / 100) : 0;
+  if (warningBytes > 0 && traffic.totalBytes >= warningBytes && !node.alertState.trafficWarningAlertedAt && !traffic.thresholdExceededAt) {
+    node.alertState.trafficWarningAlertedAt = nowIso();
+    addAlertEvent(data, {
+      nodeId: node.id,
+      type: 'traffic-warning',
+      level: 'warning',
+      message: `Node ${node.name} reached ${warningPercent}% of traffic threshold`,
+      channels: node.alertPolicy?.trafficChannels || data.alertPolicy?.trafficChannels || [],
+      dedupeKey: `traffic-warning:${node.id}:${threshold}`
+    });
+  }
   if (threshold > 0 && traffic.totalBytes >= threshold && !traffic.thresholdExceededAt) {
     traffic.thresholdExceededAt = nowIso();
+    node.alertState.trafficThresholdAlertedAt = traffic.thresholdExceededAt;
     node.status = 'warning';
-    const autoDisable = traffic.autoDisableSubscription || node.alertPolicy?.autoDisableOnTrafficLimit || data.alertPolicy?.autoDisableOnTrafficLimit;
-    if (autoDisable) node.subscriptionEnabled = false;
+    const action = trafficLimitAction(data, node, traffic);
+    const actions = applyTrafficLimitAction(data, node, action);
     addAlertEvent(data, {
       nodeId: node.id,
       type: 'traffic-threshold',
       level: 'warning',
       message: `Node ${node.name} exceeded traffic threshold`,
-      channels: node.alertPolicy?.trafficChannels || data.alertPolicy?.trafficChannels || []
+      channels: node.alertPolicy?.trafficChannels || data.alertPolicy?.trafficChannels || [],
+      actions,
+      dedupeKey: `traffic-threshold:${node.id}:${threshold}`
     });
   }
   node.traffic = traffic;
+}
+
+function evaluateOfflineAlerts(data) {
+  const checkedAt = nowIso();
+  const maxAgeMs = offlineAfterMs(data);
+  const summary = {
+    checkedAt,
+    offlineNodes: 0,
+    recoveredNodes: 0,
+    createdEvents: 0
+  };
+
+  for (const node of data.nodes || []) {
+    node.alertState ||= {};
+    if (!node.lastSeenAt || node.agentStatus === 'not-installed') continue;
+    const online = isRecent(node.lastSeenAt, maxAgeMs);
+    if (!online) {
+      summary.offlineNodes += 1;
+      if (!node.alertState.offlineSince) node.alertState.offlineSince = node.lastSeenAt;
+      node.status = 'offline';
+      node.agentStatus = 'offline';
+      if (!node.alertState.offlineAlertedAt) {
+        node.alertState.offlineAlertedAt = checkedAt;
+        addAlertEvent(data, {
+          nodeId: node.id,
+          type: 'node-offline',
+          level: 'critical',
+          message: `Node ${node.name} has been offline for more than ${Math.round(maxAgeMs / 1000)} seconds`,
+          channels: node.alertPolicy?.offlineChannels || data.alertPolicy?.offlineChannels || [],
+          dedupeKey: `node-offline:${node.id}:${node.alertState.offlineSince}`
+        });
+        summary.createdEvents += 1;
+      }
+      node.updatedAt = checkedAt;
+      continue;
+    }
+
+    if (node.alertState.offlineSince) {
+      node.alertState.recoveredAt = checkedAt;
+      node.alertState.offlineSince = null;
+      node.alertState.offlineAlertedAt = null;
+      node.status = 'online';
+      node.agentStatus = node.agentStatus === 'offline' ? 'online' : node.agentStatus;
+      addAlertEvent(data, {
+        nodeId: node.id,
+        type: 'node-recovered',
+        level: 'info',
+        message: `Node ${node.name} is back online`,
+        channels: node.alertPolicy?.offlineChannels || data.alertPolicy?.offlineChannels || [],
+        resolvedAt: checkedAt,
+        dedupeKey: `node-recovered:${node.id}:${checkedAt}`
+      });
+      summary.recoveredNodes += 1;
+      summary.createdEvents += 1;
+      node.updatedAt = checkedAt;
+    }
+  }
+
+  return summary;
 }
 
 function subscriptionLinks(data) {
@@ -522,6 +936,7 @@ function renderSubscription(data, profile) {
 
 function updateNodeFromAgent(data, node, agent, patch = {}) {
   const timestamp = nowIso();
+  const wasOffline = Boolean(node.alertState?.offlineSince) || node.status === 'offline' || node.agentStatus === 'offline';
   node.status = patch.status || 'online';
   node.agentStatus = patch.agentStatus || 'online';
   node.lastSeenAt = timestamp;
@@ -533,6 +948,21 @@ function updateNodeFromAgent(data, node, agent, patch = {}) {
   }
   if (patch.diagnostics) node.diagnostics = patch.diagnostics;
   if (Array.isArray(patch.reportedLinks)) node.reportedLinks = patch.reportedLinks;
+  if (wasOffline) {
+    node.alertState ||= {};
+    node.alertState.recoveredAt = timestamp;
+    node.alertState.offlineSince = null;
+    node.alertState.offlineAlertedAt = null;
+    addAlertEvent(data, {
+      nodeId: node.id,
+      type: 'node-recovered',
+      level: 'info',
+      message: `Node ${node.name} is back online`,
+      channels: node.alertPolicy?.offlineChannels || data.alertPolicy?.offlineChannels || [],
+      resolvedAt: timestamp,
+      dedupeKey: `node-recovered:${node.id}:${timestamp}`
+    });
+  }
 
   agent.lastSeenAt = timestamp;
   agent.updatedAt = timestamp;
@@ -802,7 +1232,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
     return sendJson(res, 200, {
       status: 'ok',
       name: 'PulseDeck',
-      version: '0.1.0',
+      version: APP_VERSION,
       port: PORT,
       time: nowIso()
     });
@@ -926,6 +1356,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
       };
     });
     if (!response) return notFound(res);
+    await dispatchPendingAlertEvents(store);
     realtime.broadcastTraffic?.();
     return sendJson(res, 200, response);
   }
@@ -949,6 +1380,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
           });
         }
       });
+      await dispatchPendingAlertEvents(store);
       realtime.broadcastTraffic?.();
       return sendJson(res, 200, { accepted: true, time: nowIso() });
     }
@@ -966,6 +1398,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
           });
         }
       });
+      await dispatchPendingAlertEvents(store);
       realtime.broadcastTraffic?.();
       return sendJson(res, 200, { accepted: true });
     }
@@ -977,6 +1410,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
         const draftNode = draft.nodes.find((item) => item.id === draftAgent?.nodeId);
         if (draftAgent && draftNode) updateNodeFromAgent(draft, draftNode, draftAgent, { diagnostics: body });
       });
+      await dispatchPendingAlertEvents(store);
       realtime.broadcastTraffic?.();
       return sendJson(res, 200, { accepted: true });
     }
@@ -1089,7 +1523,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
 
   if (method === 'GET' && url.pathname === '/api/v1/nodes') {
     return sendJson(res, 200, {
-      items: data.nodes.map((node) => presentNode(node, req))
+      items: data.nodes.map((node) => presentNode(node, req, data))
     });
   }
 
@@ -1101,7 +1535,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
       draft.nodes.push(node);
     });
     realtime.broadcastTraffic?.();
-    return sendJson(res, 201, presentNode(node, req));
+    return sendJson(res, 201, presentNode(node, req, store.data));
   }
 
   if ((method === 'PUT' || method === 'PATCH') && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'nodes' && segments[3] && !segments[4]) {
@@ -1134,7 +1568,7 @@ async function handleApi(req, res, store, url, realtime = {}) {
     });
     if (!node) return notFound(res);
     realtime.broadcastTraffic?.();
-    return sendJson(res, 200, presentNode(node, req));
+    return sendJson(res, 200, presentNode(node, req, store.data));
   }
 
   if (method === 'DELETE' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'nodes' && segments[3] && !segments[4]) {
@@ -1244,6 +1678,40 @@ async function handleApi(req, res, store, url, realtime = {}) {
     return sendCommandEventsSse(req, res, store, commandId);
   }
 
+  if (method === 'GET' && url.pathname === '/api/v1/alert-events') {
+    const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 100, 1), 500);
+    return sendJson(res, 200, {
+      items: (data.alertEvents || [])
+        .slice()
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+        .slice(0, limit)
+    });
+  }
+
+  if (method === 'POST' && url.pathname === '/api/v1/alerts/check') {
+    let summary;
+    await store.update((draft) => {
+      summary = evaluateOfflineAlerts(draft);
+    });
+    await dispatchPendingAlertEvents(store);
+    realtime.broadcastTraffic?.();
+    return sendJson(res, 200, { ...summary, items: summary.createdEvents > 0 ? store.data.alertEvents.slice(-summary.createdEvents) : [] });
+  }
+
+  if (method === 'POST' && segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'alert-events' && segments[3] && segments[4] === 'ack') {
+    const eventId = segments[3];
+    let event;
+    await store.update((draft) => {
+      event = (draft.alertEvents || []).find((item) => item.id === eventId);
+      if (!event) return;
+      event.acknowledgedAt = nowIso();
+      event.updatedAt = event.acknowledgedAt;
+      refreshAlertStatus(event);
+    });
+    if (!event) return notFound(res);
+    return sendJson(res, 200, event);
+  }
+
   if (method === 'GET' && url.pathname === '/api/v1/subscription-profiles') {
     return sendJson(res, 200, { items: data.subscriptionProfiles.map((profile) => presentProfile(profile, req)) });
   }
@@ -1334,12 +1802,20 @@ async function handleApi(req, res, store, url, realtime = {}) {
     const body = await readJson(req);
     let policy;
     await store.update((draft) => {
+      const nextAction = ['keep-node', 'disable-node-subscription', 'disable-all-subscriptions'].includes(body.trafficLimitAction)
+        ? body.trafficLimitAction
+        : body.autoDisableOnTrafficLimit === false
+          ? 'keep-node'
+          : body.autoDisableOnTrafficLimit === true
+            ? 'disable-node-subscription'
+            : undefined;
       draft.alertPolicy = {
         ...(draft.alertPolicy || {}),
         ...(body.offlineAfterSeconds !== undefined ? { offlineAfterSeconds: Number(body.offlineAfterSeconds) || 180 } : {}),
         ...(Array.isArray(body.offlineChannels) ? { offlineChannels: body.offlineChannels.map((item) => String(item)).filter(Boolean) } : {}),
         ...(Array.isArray(body.trafficChannels) ? { trafficChannels: body.trafficChannels.map((item) => String(item)).filter(Boolean) } : {}),
-        ...(body.autoDisableOnTrafficLimit !== undefined ? { autoDisableOnTrafficLimit: body.autoDisableOnTrafficLimit === true } : {})
+        ...(body.autoDisableOnTrafficLimit !== undefined ? { autoDisableOnTrafficLimit: body.autoDisableOnTrafficLimit === true } : {}),
+        ...(nextAction ? { trafficLimitAction: nextAction } : {})
       };
       policy = draft.alertPolicy;
     });

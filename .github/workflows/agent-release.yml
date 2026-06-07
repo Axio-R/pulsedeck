@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag to create or update, for example agent-v0.1.0'
+        description: 'Release tag to create or update, for example v0.2.0'
         required: false
         type: string
 

@@ -85,6 +85,26 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 
 ### 2026-06-07
 
+- Implementation direction for this turn:
+  - Continue remaining product work by closing the alerting loop.
+  - Add offline detection, traffic-limit alert actions, alert event delivery state, event acknowledgement, and a compact Alerts UI event table.
+  - Prepare a suitable `v0.2.0` release after verification, including version metadata and tagged GHCR image support.
+- Implementation completed in this turn:
+  - Added persisted node `alertState` and enriched `alertEvents` with delivery plans, action results, acknowledgement state, dedupe keys, and resolution timestamps.
+  - Added offline detection through `POST /api/v1/alerts/check`, alert event listing, and alert acknowledgement endpoints.
+  - Added traffic warning/threshold events, with policy-driven actions to disable the affected node subscription or all subscription Profiles when traffic limits are exceeded.
+  - Added real notification delivery attempts for configured Telegram Bot API and SMTP/STARTTLS email channels; disabled or incomplete channels are marked as skipped.
+  - Reworked the Alerts UI into a compact operations panel with Telegram/email settings, offline/traffic policy controls, manual offline check, event table, delivery/action status, and acknowledgement actions.
+  - Bumped project and Agent version metadata to `0.2.0` / `0.2.0-rust`.
+  - Updated the panel image workflow so `v*` tags also publish a versioned GHCR image tag.
+- Local verification after alert loop and v0.2.0 work:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 10 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `git diff --check`: passed.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: could not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+
 - Hotfix direction for Agent installer:
   - A real node reinstall failed with `curl: (23) Failure writing output to destination` while downloading `/api/v1/agents/runtime/linux-x64` directly to `/var/lib/pulsedeck/bin/pulsedeck-agent`.
   - Likely cause: reinstall/update path attempted to write over an existing Agent binary that was still executing.

@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -35,3 +37,4 @@ jobs:
           tags: |
             ghcr.io/axio-r/pulsedeck:latest
             ghcr.io/axio-r/pulsedeck:${{ github.sha }}
+            ghcr.io/axio-r/pulsedeck:${{ github.ref_name }}

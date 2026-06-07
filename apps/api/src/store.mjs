@@ -99,11 +99,27 @@ function normalizeNetwork(input = {}) {
 }
 
 function normalizeAlertPolicy(input = {}) {
+  const action = ['keep-node', 'disable-node-subscription', 'disable-all-subscriptions'].includes(input.trafficLimitAction)
+    ? input.trafficLimitAction
+    : input.autoDisableOnTrafficLimit === true
+      ? 'disable-node-subscription'
+      : 'keep-node';
   return {
     offlineAfterSeconds: Number(input.offlineAfterSeconds) || 180,
     offlineChannels: Array.isArray(input.offlineChannels) ? input.offlineChannels : ['telegram', 'email'],
     trafficChannels: Array.isArray(input.trafficChannels) ? input.trafficChannels : ['telegram', 'email'],
-    autoDisableOnTrafficLimit: input.autoDisableOnTrafficLimit === true
+    autoDisableOnTrafficLimit: input.autoDisableOnTrafficLimit === true,
+    trafficLimitAction: action
+  };
+}
+
+function normalizeAlertState(input = {}) {
+  return {
+    offlineSince: input.offlineSince || null,
+    offlineAlertedAt: input.offlineAlertedAt || null,
+    recoveredAt: input.recoveredAt || null,
+    trafficThresholdAlertedAt: input.trafficThresholdAlertedAt || null,
+    trafficWarningAlertedAt: input.trafficWarningAlertedAt || null
   };
 }
 
@@ -185,7 +201,8 @@ export function createEmptyData() {
       offlineAfterSeconds: 180,
       offlineChannels: ['telegram', 'email'],
       trafficChannels: ['telegram', 'email'],
-      autoDisableOnTrafficLimit: true
+      autoDisableOnTrafficLimit: true,
+      trafficLimitAction: 'disable-node-subscription'
     }
   };
 }
@@ -269,6 +286,7 @@ export function hydrateData(input) {
     network: normalizeNetwork(node.network),
     traffic: normalizeTraffic(node.traffic),
     alertPolicy: normalizeAlertPolicy(node.alertPolicy),
+    alertState: normalizeAlertState(node.alertState),
     singBox: normalizeSingBox(node.singBox),
     createdAt: node.createdAt || now,
     updatedAt: node.updatedAt || now
@@ -320,7 +338,12 @@ export function hydrateData(input) {
     level: event.level || 'info',
     message: event.message || '',
     channels: Array.isArray(event.channels) ? event.channels : [],
+    deliveries: Array.isArray(event.deliveries) ? event.deliveries : [],
+    actions: Array.isArray(event.actions) ? event.actions : [],
+    dedupeKey: event.dedupeKey || '',
     status: event.status || 'pending',
+    acknowledgedAt: event.acknowledgedAt || null,
+    resolvedAt: event.resolvedAt || null,
     createdAt: event.createdAt || now,
     updatedAt: event.updatedAt || now
   }));
@@ -352,6 +375,7 @@ export function createNode(input = {}) {
     network: normalizeNetwork({ regionSource: String(input.region || '').trim() ? 'manual' : 'auto-pending' }),
     traffic: normalizeTraffic(input.traffic),
     alertPolicy: normalizeAlertPolicy(input.alertPolicy),
+    alertState: normalizeAlertState(),
     singBox: normalizeSingBox(),
     createdAt: timestamp,
     updatedAt: timestamp

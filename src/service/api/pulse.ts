@@ -85,6 +85,13 @@ export interface PulseNode {
     thresholdExceededAt: string | null;
     updatedAt: string | null;
   };
+  alertState: {
+    offlineSince: string | null;
+    offlineAlertedAt: string | null;
+    recoveredAt: string | null;
+    trafficThresholdAlertedAt: string | null;
+    trafficWarningAlertedAt: string | null;
+  };
   installCommand: string;
   online: boolean;
   createdAt: string;
@@ -214,6 +221,24 @@ export interface PulseAlertPolicy {
   offlineChannels: string[];
   trafficChannels: string[];
   autoDisableOnTrafficLimit: boolean;
+  trafficLimitAction: 'keep-node' | 'disable-node-subscription' | 'disable-all-subscriptions';
+}
+
+export interface PulseAlertEvent {
+  id: string;
+  nodeId: string;
+  type: string;
+  level: string;
+  message: string;
+  channels: string[];
+  deliveries: Array<{ channel: string; status: string; detail: string; updatedAt: string }>;
+  actions: Array<{ type: string; status: string; detail: string; updatedAt: string; profileIds?: string[] }>;
+  dedupeKey: string;
+  status: string;
+  acknowledgedAt: string | null;
+  resolvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export function fetchPulseDashboard() {
@@ -309,4 +334,18 @@ export function fetchPulseAlertPolicy() {
 
 export function savePulseAlertPolicy(body: PulseAlertPolicy) {
   return pulseFetch<PulseAlertPolicy>('/alert-policy', { method: 'PATCH', body });
+}
+
+export function fetchPulseAlertEvents(limit = 100) {
+  return pulseFetch<{ items: PulseAlertEvent[] }>(`/alert-events?limit=${limit}`);
+}
+
+export function checkPulseAlerts() {
+  return pulseFetch<{ checkedAt: string; offlineNodes: number; recoveredNodes: number; createdEvents: number; items: PulseAlertEvent[] }>('/alerts/check', {
+    method: 'POST'
+  });
+}
+
+export function ackPulseAlertEvent(id: string) {
+  return pulseFetch<PulseAlertEvent>(`/alert-events/${id}/ack`, { method: 'POST' });
 }
