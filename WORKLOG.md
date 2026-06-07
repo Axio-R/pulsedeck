@@ -75,13 +75,36 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 - [x] Push, wait for GHCR, and redeploy.
 - [x] Replace Node Agent with GHCR-built Rust Agent binaries.
 - [x] Add protocol/network/traffic/alert control-plane model for the target sing-box panel.
-- [ ] Implement real Rust Agent sing-box executor for protocol add/delete, link reset, and sing-box install/update.
+- [x] Implement first real Rust Agent sing-box executor for protocol add/delete, link reset, and sing-box install/update.
+- [ ] Harden sing-box protocol templates for TLS/Reality/Hysteria2/Tuic/AnyTLS production variants and signed release selection.
 - [ ] Integrate real GeoIP/Geosite databases instead of placeholder region lookup.
 - [ ] Add WebSocket real-time traffic push and SSE command output streaming.
 
 ## Log
 
 ### 2026-06-07
+
+- Implementation direction for this turn:
+  - Continue optimizing from the worklog's pending items.
+  - Replace Rust Agent command-runner placeholders for `protocol-add`, `protocol-delete`, `reset-links`, and `sing-box-*` with a first real sing-box execution path.
+  - Keep the executor conservative for low-resource VPS/LXC hosts: no package-manager side effects without an explicit binary source, validate before config replacement, and report failures clearly.
+- Implementation completed in this turn:
+  - API Agent command polling now includes a node snapshot with current protocols, link secret, network addresses, and sing-box status so the Agent can render desired state.
+  - API command result handling now updates node `reportedLinks` and `singBox` status from Agent results.
+  - Added persistent node `singBox` status fields in the JSON store and frontend API types.
+  - Replaced Agent placeholder command responses with a Rust command runner for diagnostics, metrics, restart, `protocol-add`, `protocol-delete`, `reset-links`, `sing-box-install`, `sing-box-reinstall`, `sing-box-render`, `sing-box-apply`, and `sing-box-restart`.
+  - Added Agent-side protocol state parsing, desired-state config rendering, deterministic link/UUID/password generation, preview rendering, config backups, and active link reporting after successful apply.
+  - Added apply safety: for apply operations the Agent writes a temporary check config, runs `sing-box check`, and only then atomically replaces the target config.
+  - Added conservative sing-box install/update: existing binary detection plus explicit `downloadUrl` / `PULSEDECK_SING_BOX_DOWNLOAD_URL`; automatic package-manager install remains deferred.
+  - Extended Agent diagnostics with sing-box binary and workdir checks.
+  - Updated product/Agent docs to reflect the first executor and remaining protocol-template hardening.
+- Local verification after the sing-box executor work:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 7 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - Local `cargo check --manifest-path apps/agent/Cargo.toml` could not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+  - No local Docker image build was performed.
 
 - User clarified the PulseDeck product capability target for the current project:
   - One-command Agent deployment and automatic node information reporting.

@@ -47,6 +47,20 @@ export interface PulseNode {
   reportedLinks: string[];
   linkSecret: string;
   protocols: PulseNodeProtocol[];
+  singBox: {
+    installed: boolean;
+    version: string;
+    binaryPath: string;
+    configPath: string;
+    workDir: string;
+    serviceMode: string;
+    status: string;
+    message: string;
+    lastRenderAt: string | null;
+    lastApplyAt: string | null;
+    lastRestartAt: string | null;
+    updatedAt: string | null;
+  };
   network: {
     primaryIpv4: string | null;
     primaryIpv6: string | null;

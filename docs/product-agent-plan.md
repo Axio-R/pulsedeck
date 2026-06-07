@@ -23,13 +23,14 @@ It is not designed as a heavy multi-tenant airport platform, billing system, or 
 ## Current Gaps
 
 - Node create/list/delete exists, including cleanup of related Agent and command records.
-- Node protocol records and remote protocol add/delete commands exist for VMess, VLESS, Trojan, Shadowsocks, Hysteria2, Tuic, and AnyTLS. The Rust Agent still needs the real sing-box executor that turns these commands into installed proxy services.
-- Subscription Profile deletion exists for custom Profiles, and node-level reset-link command queuing exists. Agent-side link regeneration still needs full sing-box integration.
+- Node protocol records and remote protocol add/delete commands exist for VMess, VLESS, Trojan, Shadowsocks, Hysteria2, Tuic, and AnyTLS. The Rust Agent now has a first sing-box executor that renders desired protocol state, validates configs with `sing-box check`, applies configs, restarts common service managers, and returns generated subscription links when apply succeeds.
+- Subscription Profile deletion exists for custom Profiles, and node-level reset-link command queuing exists. Agent-side link regeneration is wired through the sing-box executor; advanced per-protocol TLS/Reality/client-specific link details still need hardening.
 - Agent reports host addresses; the panel classifies IPv4-only, IPv6-only, dual-stack, private/LXC, and WARP IPv4 plus IPv6 style nodes. Full GeoIP/Geosite database integration is not wired yet.
 - Panel-side cumulative traffic accounting and threshold auto-disable exist from metrics snapshots. Real-time traffic rates still need the WebSocket collector.
 - Rust Agent command queue is HTTP polling today; real-time bidirectional WebSocket control is not implemented yet.
 - Traffic metrics are periodic snapshots today; real-time per-second rate streaming needs a dedicated protocol.
 - Local runtime data is ignored by `.gitignore`, but broader runtime JSON and database patterns should also be ignored.
+- sing-box install/update is intentionally conservative: the Agent reports an existing binary or installs from an explicit `downloadUrl`/`PULSEDECK_SING_BOX_DOWNLOAD_URL`. Automatic package-manager install and signed release selection are still pending.
 
 ## Core Modules
 
@@ -73,6 +74,15 @@ It is not designed as a heavy multi-tenant airport platform, billing system, or 
 - Check service status.
 - Validate config before apply.
 - Roll back to previous config if apply fails.
+
+Current first implementation:
+
+- Agent receives node snapshots with queued commands, so it can render the current desired protocol state rather than only the single command payload.
+- `protocol-add`, `protocol-delete`, `reset-links`, and `sing-box-apply` require a local `sing-box` binary and fail explicitly if it is missing.
+- Apply writes a temporary check config first, runs `sing-box check`, then atomically replaces the target config only after validation passes.
+- Existing config files are backed up before replacement.
+- `sing-box-render` writes an Agent-local preview config and returns preview links without publishing them as active subscription links.
+- Generated links are reported back to the panel only after apply succeeds.
 
 ### Subscription Distribution
 

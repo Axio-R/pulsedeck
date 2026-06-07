@@ -23,6 +23,10 @@ The GHCR image builds and packages Rust Agent binaries for `linux-x64`, `linux-a
 - Metrics collection degrades gracefully when `/proc`, cgroup files, or network interface data are restricted.
 - Diagnostics report missing capabilities instead of failing the Agent loop.
 - Local commands must work even if the panel is unreachable.
+- sing-box operations degrade explicitly: render-only commands can work without a local `sing-box` binary, but apply/protocol/reset operations fail with a clear result until `sing-box` is installed.
+- The Agent validates configs with `sing-box check` before replacing the target config file.
+- Service restart tries systemd, OpenRC, then generic `service`; if none succeeds, the command result records that validation passed but restart was not confirmed.
+- Agent-driven sing-box install/update only uses an explicit binary URL from command payload or `PULSEDECK_SING_BOX_DOWNLOAD_URL`; automatic package-manager install is deferred to avoid distro-specific side effects.
 
 ## Rust Traffic Collector Direction
 

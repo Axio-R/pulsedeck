@@ -1,6 +1,8 @@
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -27,6 +29,45 @@ struct State {
     node_name: String,
     enrolled_at: String,
     last_seen_at: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct AgentCommand {
+    id: String,
+    kind: String,
+    payload_json: String,
+    node_json: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct NodeProtocol {
+    id: String,
+    kind: String,
+    name: String,
+    port: u16,
+    listen: String,
+    enabled: bool,
+    variant: String,
+    transport: String,
+    security: String,
+    settings_json: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RenderedConfig {
+    config_path: String,
+    work_dir: String,
+    protocol_count: usize,
+    reported_links: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ApplyOutcome {
+    binary_path: String,
+    version: String,
+    config_path: String,
+    restarted: bool,
+    message: String,
 }
 
 fn main() {
@@ -167,36 +208,53 @@ fn poll_commands(config: &Config, state: &State) -> Result<(), String> {
         &format!("/api/v1/agents/{}/commands", url_component(&state.agent_id)),
         &state.token,
     )?;
-    for (command_id, command_type) in parse_command_items(&response) {
-        let result = match command_type.as_str() {
-            "diagnostics" => collect_diagnostics_json(config),
-            "metrics" | "probe" => collect_metrics_json(),
-            "restart" => "{\"message\":\"restart acknowledged by Rust Agent\"}".to_string(),
-            "reset-links" | "protocol-add" | "protocol-delete" | "sing-box-install" | "sing-box-reinstall" | "sing-box-render" | "sing-box-apply" | "sing-box-restart" => {
-                format!(
-                    "{{\"message\":\"{} is planned for the Rust Agent command runner\",\"agentVersion\":\"{}\"}}",
-                    json_escape(&command_type),
-                    json_escape(VERSION)
-                )
-            }
-            _ => format!("{{\"message\":\"unknown command {}\"}}", json_escape(&command_type)),
-        };
+    for agent_command in parse_command_items(&response) {
+        let (status, result) = execute_agent_command(config, state, &agent_command);
         post_json(
             config,
             &format!(
                 "/api/v1/agents/{}/commands/{}/result",
                 url_component(&state.agent_id),
-                url_component(&command_id)
+                url_component(&agent_command.id)
             ),
             &state.token,
             &format!(
-                "{{\"status\":\"succeeded\",\"result\":{{\"finishedAt\":\"{}\",\"data\":{}}}}}",
+                "{{\"status\":\"{}\",\"result\":{{\"finishedAt\":\"{}\",\"data\":{}}}}}",
+                json_escape(&status),
                 json_escape(&now_string()),
                 result
             ),
         )?;
     }
     Ok(())
+}
+
+fn execute_agent_command(config: &Config, state: &State, agent_command: &AgentCommand) -> (String, String) {
+    let outcome = match agent_command.kind.as_str() {
+        "diagnostics" => Ok(collect_diagnostics_json(config)),
+        "metrics" | "probe" => Ok(collect_metrics_json()),
+        "restart" => restart().map(|_| "{\"message\":\"restart requested by Rust Agent\"}".to_string()),
+        "reset-links" | "protocol-add" | "protocol-delete" => render_and_apply_sing_box(config, state, agent_command),
+        "sing-box-install" => install_or_update_sing_box(config, agent_command, false),
+        "sing-box-reinstall" => install_or_update_sing_box(config, agent_command, true),
+        "sing-box-render" => render_sing_box_result(config, state, agent_command),
+        "sing-box-apply" => render_and_apply_sing_box(config, state, agent_command),
+        "sing-box-restart" => restart_sing_box_result(config),
+        _ => Ok(format!("{{\"message\":\"unknown command {}\"}}", json_escape(&agent_command.kind))),
+    };
+
+    match outcome {
+        Ok(result) => ("succeeded".to_string(), result),
+        Err(error) => (
+            "failed".to_string(),
+            format!(
+                "{{\"message\":\"{}\",\"agentVersion\":\"{}\",\"commandType\":\"{}\"}}",
+                json_escape(&error),
+                json_escape(VERSION),
+                json_escape(&agent_command.kind)
+            ),
+        ),
+    }
 }
 
 fn load_config() -> Result<Config, String> {
@@ -387,6 +445,8 @@ fn collect_diagnostics_json(config: &Config) -> String {
         check_json("curl-present", command_exists("curl"), ""),
         check_json("systemd-present", command_exists("systemctl"), ""),
         check_json("openrc-present", command_exists("rc-service"), ""),
+        check_json("sing-box-present", find_sing_box_binary().is_some(), &find_sing_box_binary().unwrap_or_default()),
+        check_json("sing-box-workdir-writable", fs::create_dir_all(sing_box_work_dir(config)).is_ok(), ""),
         check_json("lxc-hints", lxc_hints(), ""),
     ];
     format!(
@@ -565,17 +625,813 @@ fn absolute_url(config: &Config, endpoint: &str) -> String {
     }
 }
 
-fn parse_command_items(raw: &str) -> Vec<(String, String)> {
-    let mut items = Vec::new();
-    for part in raw.split("\"id\"").skip(1) {
-        let object = format!("{{\"id\"{part}");
-        let id = json_get_string(&object, "id").unwrap_or_default();
-        let kind = json_get_string(&object, "type").unwrap_or_else(|| "probe".to_string());
-        if !id.is_empty() {
-            items.push((id, kind));
+fn render_sing_box_result(config: &Config, state: &State, agent_command: &AgentCommand) -> Result<String, String> {
+    let rendered = render_sing_box_config(config, state, agent_command, false)?;
+    Ok(format!(
+        "{{\"message\":\"sing-box config rendered\",\"agentVersion\":\"{}\",\"singBox\":{{\"installed\":{},\"version\":\"{}\",\"binaryPath\":\"{}\",\"configPath\":\"{}\",\"workDir\":\"{}\",\"status\":\"rendered\",\"lastRenderAt\":\"{}\"}},\"protocolCount\":{},\"previewLinks\":{}}}",
+        json_escape(VERSION),
+        if find_sing_box_binary().is_some() { "true" } else { "false" },
+        json_escape(&sing_box_version().unwrap_or_default()),
+        json_escape(&find_sing_box_binary().unwrap_or_default()),
+        json_escape(&rendered.config_path),
+        json_escape(&rendered.work_dir),
+        json_escape(&now_string()),
+        rendered.protocol_count,
+        string_array_json(&rendered.reported_links)
+    ))
+}
+
+fn render_and_apply_sing_box(config: &Config, state: &State, agent_command: &AgentCommand) -> Result<String, String> {
+    if find_sing_box_binary().is_none() {
+        return Err("sing-box binary was not found; run sing-box-install or install sing-box manually".to_string());
+    }
+    let rendered = render_sing_box_config(config, state, agent_command, true)?;
+    let applied = apply_sing_box_config(&rendered.config_path)?;
+    Ok(format!(
+        "{{\"message\":\"{}\",\"agentVersion\":\"{}\",\"reportedLinks\":{},\"singBox\":{{\"installed\":true,\"version\":\"{}\",\"binaryPath\":\"{}\",\"configPath\":\"{}\",\"workDir\":\"{}\",\"serviceMode\":\"{}\",\"status\":\"applied\",\"message\":\"{}\",\"lastRenderAt\":\"{}\",\"lastApplyAt\":\"{}\",\"lastRestartAt\":{},\"updatedAt\":\"{}\"}},\"protocolCount\":{},\"applied\":true,\"serviceRestarted\":{}}}",
+        json_escape(&applied.message),
+        json_escape(VERSION),
+        string_array_json(&rendered.reported_links),
+        json_escape(&applied.version),
+        json_escape(&applied.binary_path),
+        json_escape(&applied.config_path),
+        json_escape(&rendered.work_dir),
+        json_escape(&config.service_mode),
+        json_escape(&applied.message),
+        json_escape(&now_string()),
+        json_escape(&now_string()),
+        if applied.restarted {
+            format!("\"{}\"", json_escape(&now_string()))
+        } else {
+            "null".to_string()
+        },
+        json_escape(&now_string()),
+        rendered.protocol_count,
+        if applied.restarted { "true" } else { "false" }
+    ))
+}
+
+fn restart_sing_box_result(config: &Config) -> Result<String, String> {
+    let binary = find_sing_box_binary().ok_or_else(|| "sing-box binary was not found".to_string())?;
+    let version = sing_box_version().unwrap_or_default();
+    let restart = restart_sing_box_service();
+    Ok(format!(
+        "{{\"message\":\"{}\",\"agentVersion\":\"{}\",\"singBox\":{{\"installed\":true,\"version\":\"{}\",\"binaryPath\":\"{}\",\"serviceMode\":\"{}\",\"status\":\"{}\",\"message\":\"{}\",\"lastRestartAt\":{},\"updatedAt\":\"{}\"}},\"serviceRestarted\":{}}}",
+        json_escape(&restart.1),
+        json_escape(VERSION),
+        json_escape(&version),
+        json_escape(&binary),
+        json_escape(&config.service_mode),
+        if restart.0 { "restarted" } else { "restart-skipped" },
+        json_escape(&restart.1),
+        if restart.0 {
+            format!("\"{}\"", json_escape(&now_string()))
+        } else {
+            "null".to_string()
+        },
+        json_escape(&now_string()),
+        if restart.0 { "true" } else { "false" }
+    ))
+}
+
+fn install_or_update_sing_box(config: &Config, agent_command: &AgentCommand, reinstall: bool) -> Result<String, String> {
+    if !reinstall {
+        if let Some(binary) = find_sing_box_binary() {
+            return Ok(sing_box_install_result(config, &binary, "sing-box already installed"));
         }
     }
-    items
+
+    let download_url = json_get_string(&agent_command.payload_json, "downloadUrl")
+        .or_else(|| env::var("PULSEDECK_SING_BOX_DOWNLOAD_URL").ok())
+        .unwrap_or_default();
+    if download_url.is_empty() {
+        return Err("sing-box binary was not found; provide payload.downloadUrl or set PULSEDECK_SING_BOX_DOWNLOAD_URL".to_string());
+    }
+
+    let bin_dir = Path::new(&config.agent_home).join("bin");
+    fs::create_dir_all(&bin_dir).map_err(|error| format!("cannot create sing-box bin dir: {error}"))?;
+    let target = bin_dir.join("sing-box");
+    let next = bin_dir.join("sing-box.next");
+    download_to(&download_url, &next.to_string_lossy())?;
+    make_executable(&next)?;
+    if target.is_file() {
+        let backup = bin_dir.join(format!("sing-box.{}.bak", now_string()));
+        let _ = fs::copy(&target, backup);
+    }
+    fs::rename(&next, &target).map_err(|error| format!("cannot install sing-box binary: {error}"))?;
+    Ok(sing_box_install_result(config, &target.to_string_lossy(), "sing-box binary installed"))
+}
+
+fn sing_box_install_result(config: &Config, binary: &str, message: &str) -> String {
+    format!(
+        "{{\"message\":\"{}\",\"agentVersion\":\"{}\",\"singBox\":{{\"installed\":true,\"version\":\"{}\",\"binaryPath\":\"{}\",\"workDir\":\"{}\",\"serviceMode\":\"{}\",\"status\":\"installed\",\"message\":\"{}\",\"updatedAt\":\"{}\"}}}}",
+        json_escape(message),
+        json_escape(VERSION),
+        json_escape(&sing_box_version().unwrap_or_default()),
+        json_escape(binary),
+        json_escape(&sing_box_work_dir(config).to_string_lossy()),
+        json_escape(&config.service_mode),
+        json_escape(message),
+        json_escape(&now_string())
+    )
+}
+
+fn render_sing_box_config(config: &Config, state: &State, agent_command: &AgentCommand, apply_target: bool) -> Result<RenderedConfig, String> {
+    let work_dir = sing_box_work_dir(config);
+    fs::create_dir_all(&work_dir).map_err(|error| format!("cannot create sing-box work dir: {error}"))?;
+    let protocols = command_protocols(config, agent_command)?;
+    let enabled: Vec<NodeProtocol> = protocols.into_iter().filter(|protocol| protocol.enabled).collect();
+    let secret = command_link_secret(state, agent_command);
+    let node_name = json_get_string(&agent_command.node_json, "name").unwrap_or_else(|| state.node_name.clone());
+    let host = command_public_host(agent_command).unwrap_or_else(|| "127.0.0.1".to_string());
+    let config_json = sing_box_config_json(&enabled, &secret)?;
+    let config_path = select_sing_box_config_path(config, agent_command, apply_target);
+    if apply_target {
+        atomic_write_checked_sing_box(&config_path, &config_json)?;
+    } else {
+        atomic_write(&config_path, &config_json)?;
+    }
+    save_protocols_state(config, &enabled)?;
+    let reported_links = enabled
+        .iter()
+        .map(|protocol| protocol_link(protocol, &host, &secret, &node_name))
+        .collect::<Vec<String>>();
+    Ok(RenderedConfig {
+        config_path,
+        work_dir: work_dir.to_string_lossy().to_string(),
+        protocol_count: enabled.len(),
+        reported_links,
+    })
+}
+
+fn command_protocols(config: &Config, agent_command: &AgentCommand) -> Result<Vec<NodeProtocol>, String> {
+    let node_protocols = json_get_value(&agent_command.node_json, "protocols").unwrap_or_default();
+    if node_protocols.trim_start().starts_with('[') {
+        let parsed = parse_protocols(&node_protocols);
+        if !parsed.is_empty() || ["protocol-delete", "sing-box-render", "sing-box-apply", "reset-links"].contains(&agent_command.kind.as_str()) {
+            return Ok(parsed);
+        }
+    }
+
+    if let Some(protocol_json) = json_get_value(&agent_command.payload_json, "protocol") {
+        if protocol_json.trim_start().starts_with('{') {
+            return Ok(vec![parse_protocol(&protocol_json)]);
+        }
+    }
+
+    Ok(load_protocols_state(config))
+}
+
+fn parse_protocols(raw: &str) -> Vec<NodeProtocol> {
+    json_array_objects(raw).into_iter().map(|item| parse_protocol(&item)).collect()
+}
+
+fn parse_protocol(raw: &str) -> NodeProtocol {
+    let kind = json_get_string(raw, "type").unwrap_or_else(|| "vless".to_string());
+    let port = normalize_port(json_get_number(raw, "port"), default_protocol_port(&kind));
+    NodeProtocol {
+        id: json_get_string(raw, "id").unwrap_or_else(|| format!("protocol-{}", now_string())),
+        name: json_get_string(raw, "name").unwrap_or_else(|| protocol_display_name(&kind).to_string()),
+        port,
+        listen: json_get_string(raw, "listen").unwrap_or_else(|| "0.0.0.0".to_string()),
+        enabled: json_get_bool(raw, "enabled").unwrap_or(true),
+        variant: json_get_string(raw, "variant").unwrap_or_default(),
+        transport: json_get_string(raw, "transport").unwrap_or_default(),
+        security: json_get_string(raw, "security").unwrap_or_default(),
+        settings_json: json_get_value(raw, "settings").unwrap_or_else(|| "{}".to_string()),
+        kind,
+    }
+}
+
+fn sing_box_config_json(protocols: &[NodeProtocol], secret: &str) -> Result<String, String> {
+    let mut inbounds = Vec::new();
+    for protocol in protocols {
+        inbounds.push(protocol_inbound_json(protocol, secret)?);
+    }
+    Ok(format!(
+        "{{\n  \"log\": {{ \"level\": \"info\", \"timestamp\": true }},\n  \"inbounds\": [\n{}\n  ],\n  \"outbounds\": [{{ \"type\": \"direct\", \"tag\": \"direct\" }}]\n}}\n",
+        inbounds
+            .into_iter()
+            .map(|item| indent_json(&item, 4))
+            .collect::<Vec<String>>()
+            .join(",\n")
+    ))
+}
+
+fn protocol_inbound_json(protocol: &NodeProtocol, secret: &str) -> Result<String, String> {
+    let tag = format!("pd-{}-{}", protocol.kind, protocol.id);
+    let listen = if protocol.listen.is_empty() { "0.0.0.0" } else { &protocol.listen };
+    let password = protocol_password(protocol, secret);
+    let uuid = protocol_uuid(protocol, secret);
+    let transport = protocol_transport_json(protocol);
+    let tls = protocol_tls_json(protocol);
+    let common = format!(
+        "\"type\":\"{}\",\"tag\":\"{}\",\"listen\":\"{}\",\"listen_port\":{}",
+        json_escape(&protocol.kind),
+        json_escape(&tag),
+        json_escape(listen),
+        protocol.port
+    );
+    let body = match protocol.kind.as_str() {
+        "shadowsocks" => {
+            let method = json_get_string(&protocol.settings_json, "method")
+                .or_else(|| (!protocol.variant.is_empty()).then(|| protocol.variant.clone()))
+                .unwrap_or_else(|| "2022-blake3-aes-128-gcm".to_string());
+            format!("{common},\"method\":\"{}\",\"password\":\"{}\"", json_escape(&method), json_escape(&password))
+        }
+        "vmess" => format!("{common},\"users\":[{{\"uuid\":\"{}\",\"alterId\":0}}]{}", json_escape(&uuid), transport),
+        "vless" => format!("{common},\"users\":[{{\"uuid\":\"{}\",\"flow\":\"{}\"}}]{}{}", json_escape(&uuid), json_escape(&json_get_string(&protocol.settings_json, "flow").unwrap_or_default()), transport, tls),
+        "trojan" => format!("{common},\"users\":[{{\"password\":\"{}\"}}]{}{}", json_escape(&password), transport, tls),
+        "hysteria2" => format!("{common},\"users\":[{{\"password\":\"{}\"}}]{}", json_escape(&password), tls),
+        "tuic" => format!(
+            "{common},\"users\":[{{\"uuid\":\"{}\",\"password\":\"{}\"}}],\"congestion_control\":\"{}\"{}",
+            json_escape(&uuid),
+            json_escape(&password),
+            json_escape(&json_get_string(&protocol.settings_json, "congestionControl").unwrap_or_else(|| "bbr".to_string())),
+            tls
+        ),
+        "anytls" => format!("{common},\"users\":[{{\"password\":\"{}\"}}]{}", json_escape(&password), tls),
+        other => return Err(format!("unsupported protocol type: {other}")),
+    };
+    Ok(format!("{{{body}}}"))
+}
+
+fn protocol_transport_json(protocol: &NodeProtocol) -> String {
+    let transport = if !protocol.transport.is_empty() {
+        protocol.transport.clone()
+    } else if ["ws", "grpc"].contains(&protocol.variant.as_str()) {
+        protocol.variant.clone()
+    } else {
+        String::new()
+    };
+    if transport.is_empty() {
+        return String::new();
+    }
+    if transport == "grpc" {
+        return ",\"transport\":{\"type\":\"grpc\"}".to_string();
+    }
+    if transport == "ws" {
+        return ",\"transport\":{\"type\":\"ws\",\"path\":\"/\"}".to_string();
+    }
+    format!(",\"transport\":{{\"type\":\"{}\"}}", json_escape(&transport))
+}
+
+fn protocol_tls_json(protocol: &NodeProtocol) -> String {
+    let wants_tls = protocol.security == "tls" || ["tls", "reality", "ech"].contains(&protocol.variant.as_str());
+    if !wants_tls {
+        return String::new();
+    }
+    let server_name = json_get_string(&protocol.settings_json, "serverName").unwrap_or_default();
+    let certificate_path = json_get_string(&protocol.settings_json, "certificatePath")
+        .or_else(|| json_get_string(&protocol.settings_json, "certPath"))
+        .unwrap_or_default();
+    let key_path = json_get_string(&protocol.settings_json, "keyPath")
+        .or_else(|| json_get_string(&protocol.settings_json, "privateKeyPath"))
+        .unwrap_or_default();
+    let mut fields = vec!["\"enabled\":true".to_string()];
+    if !server_name.is_empty() {
+        fields.push(format!("\"server_name\":\"{}\"", json_escape(&server_name)));
+    }
+    if !certificate_path.is_empty() && !key_path.is_empty() {
+        fields.push(format!("\"certificate_path\":\"{}\"", json_escape(&certificate_path)));
+        fields.push(format!("\"key_path\":\"{}\"", json_escape(&key_path)));
+    }
+    format!(",\"tls\":{{{}}}", fields.join(","))
+}
+
+fn apply_sing_box_config(config_path: &str) -> Result<ApplyOutcome, String> {
+    let binary = find_sing_box_binary().ok_or_else(|| "sing-box binary was not found; run sing-box-install or install sing-box manually".to_string())?;
+    let version = sing_box_version().unwrap_or_default();
+    let check = Command::new(&binary)
+        .args(["check", "-c", config_path])
+        .output()
+        .map_err(|error| format!("cannot run sing-box check: {error}"))?;
+    if !check.status.success() {
+        let stderr = String::from_utf8_lossy(&check.stderr);
+        let stdout = String::from_utf8_lossy(&check.stdout);
+        return Err(format!("sing-box config check failed: {}{}", stdout, stderr));
+    }
+    let restart = restart_sing_box_service();
+    Ok(ApplyOutcome {
+        binary_path: binary,
+        version,
+        config_path: config_path.to_string(),
+        restarted: restart.0,
+        message: restart.1,
+    })
+}
+
+fn restart_sing_box_service() -> (bool, String) {
+    if command_exists("systemctl") {
+        if Command::new("systemctl").args(["restart", "sing-box.service"]).status().map(|status| status.success()).unwrap_or(false) {
+            return (true, "sing-box restarted through systemd".to_string());
+        }
+    }
+    if command_exists("rc-service") {
+        if Command::new("rc-service").args(["sing-box", "restart"]).status().map(|status| status.success()).unwrap_or(false) {
+            return (true, "sing-box restarted through OpenRC".to_string());
+        }
+    }
+    if command_exists("service") {
+        if Command::new("service").args(["sing-box", "restart"]).status().map(|status| status.success()).unwrap_or(false) {
+            return (true, "sing-box restarted through service".to_string());
+        }
+    }
+    (false, "sing-box config validated; no supported service restart succeeded".to_string())
+}
+
+fn select_sing_box_config_path(config: &Config, agent_command: &AgentCommand, apply_target: bool) -> String {
+    if let Some(path) = json_get_string(&agent_command.payload_json, "configPath") {
+        if !path.trim().is_empty() {
+            return path;
+        }
+    }
+    if let Ok(path) = env::var("PULSEDECK_SING_BOX_CONFIG") {
+        if !path.trim().is_empty() {
+            return path;
+        }
+    }
+    if apply_target {
+        let system_config = PathBuf::from("/etc/sing-box/config.json");
+        if ensure_parent(&system_config).is_ok() {
+            return system_config.to_string_lossy().to_string();
+        }
+    }
+    sing_box_work_dir(config).join("config.json").to_string_lossy().to_string()
+}
+
+fn sing_box_work_dir(config: &Config) -> PathBuf {
+    Path::new(&config.agent_home).join("sing-box")
+}
+
+fn protocols_state_file(config: &Config) -> PathBuf {
+    Path::new(&config.state_file)
+        .parent()
+        .unwrap_or_else(|| Path::new(&config.agent_home))
+        .join("sing-box-protocols.json")
+}
+
+fn save_protocols_state(config: &Config, protocols: &[NodeProtocol]) -> Result<(), String> {
+    let body = format!(
+        "[{}]",
+        protocols
+            .iter()
+            .map(protocol_state_json)
+            .collect::<Vec<String>>()
+            .join(",")
+    );
+    atomic_write(&protocols_state_file(config).to_string_lossy(), &body)
+}
+
+fn load_protocols_state(config: &Config) -> Vec<NodeProtocol> {
+    let raw = fs::read_to_string(protocols_state_file(config)).unwrap_or_default();
+    parse_protocols(&raw)
+}
+
+fn protocol_state_json(protocol: &NodeProtocol) -> String {
+    format!(
+        "{{\"id\":\"{}\",\"type\":\"{}\",\"name\":\"{}\",\"port\":{},\"listen\":\"{}\",\"enabled\":{},\"variant\":\"{}\",\"transport\":\"{}\",\"security\":\"{}\",\"settings\":{}}}",
+        json_escape(&protocol.id),
+        json_escape(&protocol.kind),
+        json_escape(&protocol.name),
+        protocol.port,
+        json_escape(&protocol.listen),
+        if protocol.enabled { "true" } else { "false" },
+        json_escape(&protocol.variant),
+        json_escape(&protocol.transport),
+        json_escape(&protocol.security),
+        if protocol.settings_json.trim_start().starts_with('{') {
+            protocol.settings_json.clone()
+        } else {
+            "{}".to_string()
+        }
+    )
+}
+
+fn protocol_link(protocol: &NodeProtocol, host: &str, secret: &str, node_name: &str) -> String {
+    let label = url_component(&format!("{}-{}-{}", node_name, protocol_display_name(&protocol.kind), protocol.port));
+    let host_part = link_host(host);
+    let password = protocol_password(protocol, secret);
+    let uuid = protocol_uuid(protocol, secret);
+    match protocol.kind.as_str() {
+        "shadowsocks" => {
+            let method = json_get_string(&protocol.settings_json, "method")
+                .or_else(|| (!protocol.variant.is_empty()).then(|| protocol.variant.clone()))
+                .unwrap_or_else(|| "2022-blake3-aes-128-gcm".to_string());
+            let userinfo = base64_encode(format!("{method}:{password}").as_bytes());
+            format!("ss://{}@{}:{}#{}", userinfo, host_part, protocol.port, label)
+        }
+        "vmess" => {
+            let body = format!(
+                "{{\"v\":\"2\",\"ps\":\"{}\",\"add\":\"{}\",\"port\":\"{}\",\"id\":\"{}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"/\",\"tls\":\"\"}}",
+                json_escape(&format!("{} {}", node_name, protocol.name)),
+                json_escape(host),
+                protocol.port,
+                json_escape(&uuid)
+            );
+            format!("vmess://{}", base64_encode(body.as_bytes()))
+        }
+        "vless" => format!("vless://{}@{}:{}?encryption=none#{}", uuid, host_part, protocol.port, label),
+        "trojan" => format!("trojan://{}@{}:{}#{}", url_component(&password), host_part, protocol.port, label),
+        "hysteria2" => format!("hysteria2://{}@{}:{}#{}", url_component(&password), host_part, protocol.port, label),
+        "tuic" => format!("tuic://{}:{}@{}:{}#{}", uuid, url_component(&password), host_part, protocol.port, label),
+        "anytls" => format!("anytls://{}@{}:{}#{}", url_component(&password), host_part, protocol.port, label),
+        _ => format!("{}://{}:{}", protocol.kind, host_part, protocol.port),
+    }
+}
+
+fn command_link_secret(state: &State, agent_command: &AgentCommand) -> String {
+    json_get_string(&agent_command.payload_json, "linkSecret")
+        .or_else(|| json_get_string(&agent_command.node_json, "linkSecret"))
+        .unwrap_or_else(|| {
+            if state.agent_id.is_empty() {
+                "pulsedeck".to_string()
+            } else {
+                state.agent_id.clone()
+            }
+        })
+}
+
+fn command_public_host(agent_command: &AgentCommand) -> Option<String> {
+    let network = json_get_value(&agent_command.node_json, "network").unwrap_or_default();
+    json_get_string(&network, "primaryIpv4")
+        .or_else(|| json_get_string(&network, "primaryIpv6"))
+        .or_else(|| first_address(&agent_command.node_json))
+}
+
+fn first_address(node_json: &str) -> Option<String> {
+    let addresses = json_get_value(node_json, "addresses")?;
+    for item in json_array_objects(&addresses) {
+        if let Some(address) = json_get_string(&item, "address") {
+            if !address.is_empty() {
+                return Some(address);
+            }
+        }
+    }
+    None
+}
+
+fn parse_command_items(raw: &str) -> Vec<AgentCommand> {
+    json_array_field_objects(raw, "items")
+        .into_iter()
+        .filter_map(|object| {
+            let id = json_get_string(&object, "id").unwrap_or_default();
+            if id.is_empty() {
+                return None;
+            }
+            Some(AgentCommand {
+                id,
+                kind: json_get_string(&object, "type").unwrap_or_else(|| "probe".to_string()),
+                payload_json: json_get_value(&object, "payload").unwrap_or_else(|| "{}".to_string()),
+                node_json: json_get_value(&object, "node").unwrap_or_else(|| "{}".to_string()),
+            })
+        })
+        .collect()
+}
+
+fn json_array_field_objects(raw: &str, key: &str) -> Vec<String> {
+    let Some(value) = json_get_value(raw, key) else {
+        return Vec::new();
+    };
+    json_array_objects(&value)
+}
+
+fn json_array_objects(raw: &str) -> Vec<String> {
+    let mut objects = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    let mut start = None;
+    for (index, ch) in raw.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            continue;
+        }
+        if ch == '{' {
+            if depth == 0 {
+                start = Some(index);
+            }
+            depth += 1;
+            continue;
+        }
+        if ch == '}' && depth > 0 {
+            depth -= 1;
+            if depth == 0 {
+                if let Some(start_index) = start {
+                    objects.push(raw[start_index..=index].to_string());
+                }
+                start = None;
+            }
+        }
+    }
+    objects
+}
+
+fn json_get_value(raw: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let start = raw.find(&needle)?;
+    let after_key = &raw[start + needle.len()..];
+    let colon = after_key.find(':')?;
+    let rest = after_key[colon + 1..].trim_start();
+    let mut chars = rest.char_indices();
+    let (_, first) = chars.next()?;
+    if first == '"' {
+        let mut escaped = false;
+        for (index, ch) in chars {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' {
+                return Some(rest[..=index].to_string());
+            }
+        }
+        return None;
+    }
+    if first == '{' || first == '[' {
+        let open = first;
+        let close = if first == '{' { '}' } else { ']' };
+        let mut depth = 1usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (index, ch) in chars {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            if ch == '"' {
+                in_string = true;
+                continue;
+            }
+            if ch == open {
+                depth += 1;
+            } else if ch == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(rest[..=index].to_string());
+                }
+            }
+        }
+        return None;
+    }
+    let end = rest
+        .find(|ch: char| ch == ',' || ch == '}' || ch == ']')
+        .unwrap_or(rest.len());
+    Some(rest[..end].trim().to_string())
+}
+
+fn json_get_bool(raw: &str, key: &str) -> Option<bool> {
+    match json_get_value(raw, key)?.as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn find_sing_box_binary() -> Option<String> {
+    if let Ok(path) = env::var("PULSEDECK_SING_BOX_BIN") {
+        if Path::new(&path).is_file() {
+            return Some(path);
+        }
+    }
+    if let Some(path) = find_command_path("sing-box") {
+        return Some(path);
+    }
+    for path in ["/usr/local/bin/sing-box", "/usr/bin/sing-box", "/opt/sing-box/sing-box"] {
+        if Path::new(path).is_file() {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
+fn find_command_path(name: &str) -> Option<String> {
+    env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .map(|dir| Path::new(dir).join(name))
+        .find(|path| path.is_file())
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+fn sing_box_version() -> Option<String> {
+    let binary = find_sing_box_binary()?;
+    let output = Command::new(binary).arg("version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    Some(raw.lines().next().unwrap_or("").trim().to_string())
+}
+
+fn atomic_write(file: &str, content: &str) -> Result<(), String> {
+    let target = Path::new(file);
+    ensure_parent(target)?;
+    let tmp = format!("{}.{}.tmp", file, std::process::id());
+    fs::write(&tmp, content).map_err(|error| format!("cannot write {file}: {error}"))?;
+    if target.is_file() {
+        let backup = format!("{}.{}.bak", file, now_string());
+        let _ = fs::copy(target, backup);
+    }
+    fs::rename(&tmp, target).map_err(|error| format!("cannot replace {file}: {error}"))?;
+    Ok(())
+}
+
+fn atomic_write_checked_sing_box(file: &str, content: &str) -> Result<(), String> {
+    let binary = find_sing_box_binary().ok_or_else(|| "sing-box binary was not found".to_string())?;
+    let check_file = format!("{}.{}.check", file, std::process::id());
+    let target = Path::new(file);
+    ensure_parent(target)?;
+    fs::write(&check_file, content).map_err(|error| format!("cannot write sing-box check config: {error}"))?;
+    let output = Command::new(&binary)
+        .args(["check", "-c", &check_file])
+        .output()
+        .map_err(|error| format!("cannot run sing-box check: {error}"))?;
+    let _ = fs::remove_file(&check_file);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!("sing-box config check failed before apply: {}{}", stdout, stderr));
+    }
+    atomic_write(file, content)
+}
+
+fn ensure_parent(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("cannot create dir {}: {error}", parent.display()))?;
+    }
+    Ok(())
+}
+
+fn make_executable(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(path)
+            .map_err(|error| format!("cannot read permissions for {}: {error}", path.display()))?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).map_err(|error| format!("cannot chmod {}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn protocol_display_name(kind: &str) -> &'static str {
+    match kind {
+        "vmess" => "VMess",
+        "vless" => "VLESS",
+        "trojan" => "Trojan",
+        "shadowsocks" => "Shadowsocks",
+        "hysteria2" => "Hysteria2",
+        "tuic" => "Tuic",
+        "anytls" => "AnyTLS",
+        _ => "Proxy",
+    }
+}
+
+fn default_protocol_port(kind: &str) -> u16 {
+    match kind {
+        "vmess" => 10001,
+        "shadowsocks" => 8388,
+        _ => 443,
+    }
+}
+
+fn normalize_port(value: Option<u64>, fallback: u16) -> u16 {
+    match value {
+        Some(port) if (1..=65535).contains(&port) => port as u16,
+        _ => fallback,
+    }
+}
+
+fn protocol_password(protocol: &NodeProtocol, secret: &str) -> String {
+    json_get_string(&protocol.settings_json, "password").unwrap_or_else(|| {
+        let seed = format!("{}:{}:{}", secret, protocol.id, protocol.kind);
+        format!("pd-{}", base64_url_no_pad(seed.as_bytes()))
+    })
+}
+
+fn protocol_uuid(protocol: &NodeProtocol, secret: &str) -> String {
+    if let Some(uuid) = json_get_string(&protocol.settings_json, "uuid") {
+        if !uuid.is_empty() {
+            return uuid;
+        }
+    }
+    pseudo_uuid(&format!("{}:{}:{}", secret, protocol.id, protocol.kind))
+}
+
+fn pseudo_uuid(seed: &str) -> String {
+    let mut bytes = [0u8; 16];
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in seed.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        hash ^= (index as u64).wrapping_mul(0x9e3779b97f4a7c15);
+        hash = hash.rotate_left(13).wrapping_mul(0xff51afd7ed558ccd);
+        *byte = (hash >> ((index % 8) * 8)) as u8;
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+fn link_host(host: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+fn indent_json(raw: &str, spaces: usize) -> String {
+    let prefix = " ".repeat(spaces);
+    raw.lines()
+        .map(|line| format!("{prefix}{line}"))
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
+fn string_array_json(values: &[String]) -> String {
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|value| format!("\"{}\"", json_escape(value)))
+            .collect::<Vec<String>>()
+            .join(",")
+    )
+}
+
+fn base64_url_no_pad(input: &[u8]) -> String {
+    base64_with_alphabet(input, b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_", false)
+}
+
+fn base64_encode(input: &[u8]) -> String {
+    base64_with_alphabet(input, b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", true)
+}
+
+fn base64_with_alphabet(input: &[u8], alphabet: &[u8; 64], padding: bool) -> String {
+    let mut output = String::new();
+    let mut index = 0usize;
+    while index < input.len() {
+        let b0 = input[index];
+        let b1 = if index + 1 < input.len() { input[index + 1] } else { 0 };
+        let b2 = if index + 2 < input.len() { input[index + 2] } else { 0 };
+        let triple = ((b0 as u32) << 16) | ((b1 as u32) << 8) | b2 as u32;
+        output.push(alphabet[((triple >> 18) & 0x3f) as usize] as char);
+        output.push(alphabet[((triple >> 12) & 0x3f) as usize] as char);
+        if index + 1 < input.len() {
+            output.push(alphabet[((triple >> 6) & 0x3f) as usize] as char);
+        } else if padding {
+            output.push('=');
+        }
+        if index + 2 < input.len() {
+            output.push(alphabet[(triple & 0x3f) as usize] as char);
+        } else if padding {
+            output.push('=');
+        }
+        index += 3;
+    }
+    output
 }
 
 fn json_get_string(raw: &str, key: &str) -> Option<String> {

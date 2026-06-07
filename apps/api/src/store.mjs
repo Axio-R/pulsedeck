@@ -103,6 +103,23 @@ function normalizeAlertPolicy(input = {}) {
   };
 }
 
+function normalizeSingBox(input = {}) {
+  return {
+    installed: input.installed === true,
+    version: input.version || '',
+    binaryPath: input.binaryPath || '',
+    configPath: input.configPath || '',
+    workDir: input.workDir || '',
+    serviceMode: input.serviceMode || '',
+    status: input.status || 'unknown',
+    message: input.message || '',
+    lastRenderAt: input.lastRenderAt || null,
+    lastApplyAt: input.lastApplyAt || null,
+    lastRestartAt: input.lastRestartAt || null,
+    updatedAt: input.updatedAt || null
+  };
+}
+
 export function createNodeProtocol(input = {}) {
   const timestamp = nowIso();
   const type = normalizeProtocolType(input.type);
@@ -246,6 +263,7 @@ export function hydrateData(input) {
     network: normalizeNetwork(node.network),
     traffic: normalizeTraffic(node.traffic),
     alertPolicy: normalizeAlertPolicy(node.alertPolicy),
+    singBox: normalizeSingBox(node.singBox),
     createdAt: node.createdAt || now,
     updatedAt: node.updatedAt || now
   }));
@@ -315,6 +333,7 @@ export function createNode(input = {}) {
     network: normalizeNetwork({ regionSource: String(input.region || '').trim() ? 'manual' : 'auto-pending' }),
     traffic: normalizeTraffic(input.traffic),
     alertPolicy: normalizeAlertPolicy(input.alertPolicy),
+    singBox: normalizeSingBox(),
     createdAt: timestamp,
     updatedAt: timestamp
   };

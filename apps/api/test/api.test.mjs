@@ -191,6 +191,42 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.equal(added.body.protocol.port, 443);
     assert.equal(added.body.command.type, 'protocol-add');
 
+    const queued = await request(app.base, `/api/v1/agents/${agentEnroll.body.agentId}/commands`, {
+      headers: { authorization: `Bearer ${agentEnroll.body.token}` }
+    });
+    assert.equal(queued.res.status, 200);
+    const protocolCommand = queued.body.items.find((item) => item.type === 'protocol-add');
+    assert.ok(protocolCommand);
+    assert.equal(protocolCommand.node.id, created.body.id);
+    assert.equal(protocolCommand.node.protocols.length, 1);
+    assert.equal(protocolCommand.node.protocols[0].type, 'vless');
+
+    const commandResult = await request(app.base, `/api/v1/agents/${agentEnroll.body.agentId}/commands/${protocolCommand.id}/result`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${agentEnroll.body.token}` },
+      body: {
+        status: 'succeeded',
+        result: {
+          finishedAt: '1',
+          data: {
+            reportedLinks: ['vless://example@203.0.113.10:443#auto-region-node'],
+            singBox: {
+              installed: true,
+              status: 'applied',
+              configPath: '/etc/sing-box/config.json'
+            }
+          }
+        }
+      }
+    });
+    assert.equal(commandResult.res.status, 200);
+
+    const listedAfterResult = await request(app.base, '/api/v1/nodes', { headers: auth });
+    const withCommandResult = listedAfterResult.body.items.find((node) => node.id === created.body.id);
+    assert.deepEqual(withCommandResult.reportedLinks, ['vless://example@203.0.113.10:443#auto-region-node']);
+    assert.equal(withCommandResult.singBox.status, 'applied');
+    assert.equal(withCommandResult.singBox.configPath, '/etc/sing-box/config.json');
+
     const reset = await request(app.base, `/api/v1/nodes/${created.body.id}/links/reset`, {
       method: 'POST',
       headers: auth

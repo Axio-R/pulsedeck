@@ -128,6 +128,27 @@ function presentNode(node, req) {
   };
 }
 
+function agentNodeSnapshot(node) {
+  return {
+    id: node.id,
+    name: node.name,
+    region: node.region,
+    linkSecret: node.linkSecret,
+    subscriptionEnabled: node.subscriptionEnabled,
+    protocols: Array.isArray(node.protocols) ? node.protocols : [],
+    network: node.network || {},
+    addresses: Array.isArray(node.addresses) ? node.addresses : [],
+    singBox: node.singBox || {}
+  };
+}
+
+function presentAgentCommand(command, node) {
+  return {
+    ...command,
+    node: agentNodeSnapshot(node)
+  };
+}
+
 function dashboard(data) {
   const onlineNodes = data.nodes.filter((node) => isRecent(node.lastSeenAt));
   const warningNodes = data.nodes.filter((node) => node.status === 'warning' || node.agentStatus === 'degraded');
@@ -391,6 +412,34 @@ function updateNodeFromAgent(data, node, agent, patch = {}) {
   if (patch.serviceMode) agent.serviceMode = patch.serviceMode;
 }
 
+function resultData(result) {
+  if (result && typeof result === 'object' && !Array.isArray(result) && result.data && typeof result.data === 'object') {
+    return result.data;
+  }
+  return result && typeof result === 'object' && !Array.isArray(result) ? result : {};
+}
+
+function applyCommandResultSideEffects(draft, command, result) {
+  const node = draft.nodes.find((item) => item.id === command.nodeId);
+  if (!node) return;
+  const data = resultData(result);
+  const timestamp = nowIso();
+
+  if (Array.isArray(data.reportedLinks)) {
+    node.reportedLinks = data.reportedLinks.map((link) => String(link).trim()).filter(Boolean);
+    node.updatedAt = timestamp;
+  }
+
+  if (data.singBox && typeof data.singBox === 'object' && !Array.isArray(data.singBox)) {
+    node.singBox = {
+      ...(node.singBox || {}),
+      ...data.singBox,
+      updatedAt: data.singBox.updatedAt || timestamp
+    };
+    node.updatedAt = timestamp;
+  }
+}
+
 async function serveStatic(req, res, pathname) {
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const target = path.normalize(path.join(WEB_DIST_DIR, rel));
@@ -620,7 +669,7 @@ async function handleApi(req, res, store, url) {
           }
         }
       });
-      return sendJson(res, 200, { items: commands });
+      return sendJson(res, 200, { items: commands.map((command) => presentAgentCommand(command, node)) });
     }
 
     if (method === 'POST' && segments[4] === 'commands' && segments[5] && segments[6] === 'result') {
@@ -633,6 +682,7 @@ async function handleApi(req, res, store, url) {
         found = true;
         command.status = body.status === 'failed' ? 'failed' : 'succeeded';
         command.result = body.result || body;
+        applyCommandResultSideEffects(draft, command, command.result);
         command.updatedAt = nowIso();
       });
       if (!found) return notFound(res);
