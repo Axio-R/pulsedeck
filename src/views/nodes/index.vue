@@ -71,9 +71,12 @@ const columns = computed<DataTableColumns<PulseNode>>(() => [
   {
     title: '区域',
     key: 'region',
-    width: 130,
+    width: 170,
     render(row: PulseNode) {
-      return displayNodeRegion(row);
+      return h('div', { class: 'region-cell' }, [
+        h('span', { class: 'region-icon' }, regionIconLabel(row)),
+        h('span', { class: 'region-name', title: displayNodeRegion(row) }, displayNodeRegion(row))
+      ]);
     }
   },
   {
@@ -94,6 +97,21 @@ const columns = computed<DataTableColumns<PulseNode>>(() => [
         { type: row.online ? 'success' : row.agentStatus === 'not-installed' ? 'warning' : 'error', size: 'small' },
         { default: () => (row.online ? '在线' : row.agentStatus) }
       );
+    }
+  },
+  {
+    title: 'Agent',
+    key: 'agentVersion',
+    width: 150,
+    render(row: PulseNode) {
+      return h('div', { class: 'agent-version-cell' }, [
+        h('strong', agentVersionLabel(row)),
+        h(
+          NTag,
+          { type: row.agent?.updateAvailable ? 'warning' : 'success', size: 'small', bordered: false },
+          { default: () => (row.agent?.updateAvailable ? '可更新' : '最新') }
+        )
+      ]);
     }
   },
   {
@@ -131,12 +149,14 @@ const columns = computed<DataTableColumns<PulseNode>>(() => [
   {
     title: '操作',
     key: 'actions',
-    width: 390,
+    width: 500,
     render(row: PulseNode) {
       return h('div', { class: 'table-actions' }, [
         h(NButton, { size: 'small', onClick: () => openInstallDrawer(row) }, { default: () => '安装命令' }),
         h(NButton, { size: 'small', onClick: () => copyInstall(row) }, { default: () => '复制安装' }),
         h(NButton, { size: 'small', onClick: () => queue(row, 'probe') }, { default: () => '探测' }),
+        h(NButton, { size: 'small', onClick: () => queue(row, 'agent-update-check') }, { default: () => '检查 Agent' }),
+        h(NButton, { size: 'small', type: 'primary', secondary: true, onClick: () => queue(row, 'agent-update') }, { default: () => '更新 Agent' }),
         h(NButton, { size: 'small', onClick: () => resetLinks(row) }, { default: () => '重置链接' }),
         h(
           NPopconfirm,
@@ -488,6 +508,27 @@ function displayNodeRegion(node: PulseNode) {
   return node.displayRegion || node.region || '等待 Agent 上报';
 }
 
+function regionIconLabel(node: PulseNode) {
+  const value = String(node.regionIcon || node.regionCode || '').trim().toUpperCase();
+  if (/^[A-Z]{2}$/.test(value)) return value;
+  const region = displayNodeRegion(node);
+  const match = /(?:^|\b)([A-Z]{2})(?:\b|$)/.exec(region);
+  return match?.[1] || 'AUTO';
+}
+
+function agentVersionLabel(node: PulseNode) {
+  return node.agent?.version && node.agent.version !== 'unknown' ? node.agent.version : '-';
+}
+
+function agentUpdateLabel(node: PulseNode) {
+  const update = node.agent?.update || node.agentUpdate;
+  if (node.agent?.updateAvailable || update?.updateAvailable) return `可更新 ${node.agent?.latestVersion || update?.latestVersion || ''}`.trim();
+  if (update?.status === 'updated') return '已更新待重启';
+  if (update?.status === 'unavailable') return '目标包未发布';
+  if (node.agent?.runtimeAvailable === false) return '运行时未发布';
+  return node.agent?.version && node.agent.version !== 'unknown' ? '最新' : '待上报';
+}
+
 function nodeIpRows(node: PulseNode): NodeIpRow[] {
   const rows: NodeIpRow[] = [];
   const warpAddresses = (node.addresses || [])
@@ -532,6 +573,9 @@ function commandLabel(type: string) {
   const labels: Record<string, string> = {
     probe: '探测',
     diagnostics: '诊断',
+    restart: '重启 Agent',
+    'agent-update-check': '检查 Agent',
+    'agent-update': '更新 Agent',
     'sing-box-render': '渲染配置',
     'sing-box-apply': '应用配置',
     'sing-box-restart': '重启 sing-box',
@@ -829,6 +873,8 @@ onUnmounted(() => {
         <NSelect v-model:value="groupFilter" size="small" :options="groupOptions" class="toolbar-select" />
         <NButton size="small" secondary @click="batchQueue('probe')">批量探测</NButton>
         <NButton size="small" secondary @click="batchQueue('diagnostics')">批量诊断</NButton>
+        <NButton size="small" secondary @click="batchQueue('agent-update-check')">批量检查 Agent</NButton>
+        <NButton size="small" type="primary" secondary @click="batchQueue('agent-update')">批量更新 Agent</NButton>
         <NButton size="small" type="primary" secondary @click="batchQueue('sing-box-apply')">批量应用</NButton>
         <NButton size="small" secondary @click="resetSelectedTraffic">清零流量</NButton>
         <NPopconfirm @positive-click="batchDelete">
@@ -903,8 +949,11 @@ onUnmounted(() => {
       <NGi v-for="node in visibleNodes" :key="node.id" span="24 l:12 2xl:8">
         <NCard :bordered="false" class="card-wrapper node-card">
           <div class="node-head">
-            <div class="min-w-0">
-              <div class="node-title">{{ node.name }}</div>
+            <div class="node-title-block">
+              <div class="node-title-row">
+                <span class="region-icon">{{ regionIconLabel(node) }}</span>
+                <div class="node-title">{{ node.name }}</div>
+              </div>
               <div class="node-subtitle">
                 {{ displayNodeRegion(node) }} · {{ ipModeLabel(node.network?.ipMode) }}
               </div>
@@ -961,6 +1010,14 @@ onUnmounted(() => {
             <div class="metric-item">
               <span>订阅</span>
               <strong>{{ node.subscriptionEnabled ? '启用' : '停用' }}</strong>
+            </div>
+            <div class="metric-item">
+              <span>Agent</span>
+              <strong>{{ agentVersionLabel(node) }}</strong>
+            </div>
+            <div class="metric-item">
+              <span>更新</span>
+              <strong>{{ agentUpdateLabel(node) }}</strong>
             </div>
             <div class="metric-item">
               <span>最后上报</span>
@@ -1151,6 +1208,9 @@ onUnmounted(() => {
             <NButton size="small" @click="moveNode(node, 1)">下移</NButton>
             <NButton size="small" @click="queue(node, 'probe')">探测</NButton>
             <NButton size="small" @click="queue(node, 'diagnostics')">诊断</NButton>
+            <NButton size="small" @click="queue(node, 'agent-update-check')">检查 Agent</NButton>
+            <NButton size="small" type="primary" secondary @click="queue(node, 'agent-update')">更新 Agent</NButton>
+            <NButton size="small" @click="queue(node, 'restart')">重启 Agent</NButton>
             <NButton size="small" @click="queue(node, 'sing-box-render')">渲染</NButton>
             <NButton size="small" type="primary" secondary @click="queue(node, 'sing-box-apply')">应用配置</NButton>
             <NButton size="small" @click="queue(node, 'sing-box-restart')">重启 sing-box</NButton>
@@ -1205,6 +1265,45 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.region-cell,
+.agent-version-cell,
+.node-title-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+}
+
+.region-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 22px;
+  border: 1px solid rgba(37, 99, 235, 0.18);
+  border-radius: 6px;
+  background: rgba(37, 99, 235, 0.08);
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.region-name,
+.agent-version-cell strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-version-cell {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
 }
 
 .bulk-toolbar {
@@ -1301,6 +1400,10 @@ onUnmounted(() => {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+.node-title-block {
+  min-width: 0;
 }
 
 .node-title {

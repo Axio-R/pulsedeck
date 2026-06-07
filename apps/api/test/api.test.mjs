@@ -94,8 +94,8 @@ test('health reports PulseDeck on default product port', async () => {
     const { res, body } = await request(app.base, '/api/v1/health');
     assert.equal(res.status, 200);
     assert.equal(body.name, 'PulseDeck');
-    assert.equal(body.version, '0.2.7');
-    assert.equal(body.agentVersion, '0.2.7-rust');
+    assert.equal(body.version, '0.2.8');
+    assert.equal(body.agentVersion, '0.2.8-rust');
     assert.equal(body.port, 14770);
   } finally {
     await app.close();
@@ -107,7 +107,7 @@ test('agent runtime manifest exposes target metadata', async () => {
   try {
     const { res, body } = await request(app.base, '/api/v1/agents/runtime/manifest');
     assert.equal(res.status, 200);
-    assert.equal(body.agentVersion, '0.2.7-rust');
+    assert.equal(body.agentVersion, '0.2.8-rust');
     assert.ok(Array.isArray(body.targets));
     assert.deepEqual(
       body.targets.map((target) => target.target),
@@ -122,7 +122,7 @@ test('agent runtime manifest exposes target metadata', async () => {
     const single = await request(app.base, '/api/v1/agents/runtime/manifest/linux-x64');
     assert.equal(single.res.status, 200);
     assert.equal(single.body.target, 'linux-x64');
-    assert.equal(single.body.version, '0.2.7-rust');
+    assert.equal(single.body.version, '0.2.8-rust');
   } finally {
     await app.close();
   }
@@ -337,6 +337,10 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.equal(discovered.network.ipMode, 'dual-stack');
     assert.equal(discovered.network.regionSource, 'geoip-empty');
     assert.equal(discovered.displayRegion, 'GeoIP 未配置');
+    assert.equal(discovered.agent.version, '0.1.0-rust');
+    assert.equal(discovered.agent.target, 'linux-x64');
+    assert.equal(discovered.agent.latestVersion, '0.2.8-rust');
+    assert.equal(discovered.agent.updateAvailable, true);
 
     const agentGeoNode = await request(app.base, '/api/v1/nodes', {
       method: 'POST',
@@ -379,7 +383,7 @@ test('nodes support automatic network discovery, protocol commands, and link res
     await request(app.base, `/api/v1/agents/enroll/${warpNode.body.installId}`, {
       method: 'POST',
       body: {
-        version: '0.2.7-rust',
+        version: '0.2.8-rust',
         platform: 'linux',
         arch: 'x86_64',
         installDir: '/var/lib/pulsedeck',
@@ -485,6 +489,44 @@ test('nodes support automatic network discovery, protocol commands, and link res
     assert.deepEqual(withCommandResult.reportedLinks, ['vless://example@203.0.113.10:443#auto-region-node']);
     assert.equal(withCommandResult.singBox.status, 'applied');
     assert.equal(withCommandResult.singBox.configPath, '/etc/sing-box/config.json');
+
+    const updateCheck = await request(app.base, `/api/v1/nodes/${created.body.id}/commands`, {
+      method: 'POST',
+      headers: auth,
+      body: { type: 'agent-update-check' }
+    });
+    assert.equal(updateCheck.res.status, 201);
+    const queuedUpdateChecks = await request(app.base, `/api/v1/agents/${agentEnroll.body.agentId}/commands`, {
+      headers: { authorization: `Bearer ${agentEnroll.body.token}` }
+    });
+    assert.ok(queuedUpdateChecks.body.items.some((item) => item.id === updateCheck.body.id));
+    const updateResult = await request(app.base, `/api/v1/agents/${agentEnroll.body.agentId}/commands/${updateCheck.body.id}/result`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${agentEnroll.body.token}` },
+      body: {
+        status: 'succeeded',
+        result: {
+          finishedAt: '2',
+          data: {
+            message: '发现可更新 Agent 版本',
+            agentUpdate: {
+              status: 'update-available',
+              target: 'linux-x64',
+              currentVersion: '0.1.0-rust',
+              latestVersion: '0.2.8-rust',
+              available: true,
+              updateAvailable: true
+            }
+          }
+        }
+      }
+    });
+    assert.equal(updateResult.res.status, 200);
+    const listedAfterAgentCheck = await request(app.base, '/api/v1/nodes', { headers: auth });
+    const withAgentUpdate = listedAfterAgentCheck.body.items.find((node) => node.id === created.body.id);
+    assert.equal(withAgentUpdate.agent.update.status, 'update-available');
+    assert.equal(withAgentUpdate.agent.update.updateAvailable, true);
+    assert.equal(withAgentUpdate.agent.update.latestVersion, '0.2.8-rust');
 
     const eventsAfterResult = await request(app.base, `/api/v1/commands/${protocolCommand.id}/events?format=json`, { headers: auth });
     assert.ok(eventsAfterResult.body.items.some((event) => event.type === 'result'));
@@ -1050,6 +1092,50 @@ test('subscription profiles protect defaults and delete custom profiles', async 
     });
     assert.equal(custom.res.status, 201);
     assert.equal(custom.body.deletable, true);
+
+    const hkNode = await request(app.base, '/api/v1/nodes', {
+      method: 'POST',
+      headers: auth,
+      body: { name: 'hk-node', region: 'HK · Hong Kong', group: 'asia', tags: ['edge'] }
+    });
+    const hkAgent = await request(app.base, `/api/v1/agents/enroll/${hkNode.body.installId}`, {
+      method: 'POST',
+      body: { version: '0.2.8-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
+    });
+    await request(app.base, `/api/v1/agents/${hkAgent.body.agentId}/metrics`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${hkAgent.body.token}` },
+      body: { metrics: {}, reportedLinks: ['vless://hk@example.com:443#hk-node'] }
+    });
+    const usNode = await request(app.base, '/api/v1/nodes', {
+      method: 'POST',
+      headers: auth,
+      body: { name: 'us-node', region: 'US · California', group: 'us', tags: ['edge'] }
+    });
+    const usAgent = await request(app.base, `/api/v1/agents/enroll/${usNode.body.installId}`, {
+      method: 'POST',
+      body: { version: '0.2.8-rust', platform: 'linux', arch: 'x86_64', installDir: '/var/lib/pulsedeck', serviceMode: 'manual' }
+    });
+    await request(app.base, `/api/v1/agents/${usAgent.body.agentId}/metrics`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${usAgent.body.token}` },
+      body: { metrics: {}, reportedLinks: ['vless://us@example.com:443#us-node'] }
+    });
+    const filtered = await request(app.base, '/api/v1/subscription-profiles', {
+      method: 'POST',
+      headers: auth,
+      body: {
+        name: '亚洲节点',
+        format: 'raw',
+        filters: { groups: ['asia'] },
+        linkPrefixMode: 'region'
+      }
+    });
+    const sub = await request(app.base, `/sub/${filtered.body.token}`);
+    assert.equal(sub.res.status, 200);
+    const decodedSub = decodeURIComponent(sub.body);
+    assert.ok(decodedSub.includes('HK · Hong Kong hk-node'));
+    assert.equal(decodedSub.includes('us-node'), false);
 
     const deleted = await request(app.base, `/api/v1/subscription-profiles/${custom.body.id}`, {
       method: 'DELETE',

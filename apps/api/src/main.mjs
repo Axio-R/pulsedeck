@@ -17,7 +17,7 @@ const DEFAULT_GEOIP_FILE = path.join(ROOT_DIR, 'geoip.json');
 const DEFAULT_GEOSITE_FILE = path.join(ROOT_DIR, 'geosite.json');
 const PORT = Number(process.env.PULSEDECK_PORT || 14770);
 const HOST = process.env.PULSEDECK_HOST || '0.0.0.0';
-const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.7';
+const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.8';
 const AGENT_VERSION = process.env.PULSEDECK_AGENT_VERSION || `${APP_VERSION}-rust`;
 const AGENT_RUNTIME_TARGETS = ['linux-x64', 'linux-arm64', 'linux-armv7l'];
 const ADMIN_USER = process.env.PULSEDECK_ADMIN_USER || 'admin';
@@ -166,19 +166,65 @@ function presentProfile(profile, req) {
   const base = publicBaseUrl(req);
   return {
     ...profile,
+    filters: normalizeSubscriptionFilters(profile.filters),
+    linkPrefixMode: normalizeLinkPrefixMode(profile.linkPrefixMode),
     deletable: profile.protected !== true,
     publicUrl: `${base}/sub/${profile.token}`
   };
 }
 
 function presentNode(node, req, data) {
+  const region = compactRegionLabel(node.region);
+  const display = displayRegion(node);
   return {
     ...node,
-    region: compactRegionLabel(node.region),
+    region,
     online: isNodeOnline(node, data),
-    displayRegion: displayRegion(node),
+    displayRegion: display,
+    regionCode: nodeRegionCode(node),
+    regionIcon: nodeRegionCode(node) || 'AUTO',
+    agent: presentNodeAgent(node, data, req),
     installCommand: `curl -fsSL '${publicBaseUrl(req)}/api/v1/agents/install/${encodeURIComponent(node.installId)}' | sh`
   };
+}
+
+function presentNodeAgent(node, data, req) {
+  const agent = data.agents.find((item) => item.nodeId === node.id) || null;
+  const target = agentRuntimeTargetForAgent(agent);
+  const runtime = target ? agentRuntimeMetadata(target, req) : null;
+  const currentVersion = agent?.version || '';
+  const latestVersion = runtime?.version || AGENT_VERSION;
+  const available = runtime?.available === true;
+  const updateAvailable = Boolean(currentVersion && currentVersion !== 'unknown' && latestVersion && currentVersion !== latestVersion);
+  return {
+    id: agent?.id || null,
+    version: currentVersion || 'unknown',
+    platform: agent?.platform || 'unknown',
+    arch: agent?.arch || 'unknown',
+    target,
+    installDir: agent?.installDir || '',
+    serviceMode: agent?.serviceMode || 'unknown',
+    lastSeenAt: agent?.lastSeenAt || null,
+    latestVersion,
+    runtimeAvailable: available,
+    updateAvailable,
+    update: {
+      ...(node.agentUpdate || {}),
+      currentVersion: node.agentUpdate?.currentVersion || currentVersion || '',
+      latestVersion: node.agentUpdate?.latestVersion || latestVersion || '',
+      target: node.agentUpdate?.target || target || '',
+      updateAvailable: node.agentUpdate?.updateAvailable ?? updateAvailable,
+      available: node.agentUpdate?.available ?? available
+    }
+  };
+}
+
+function agentRuntimeTargetForAgent(agent) {
+  const arch = String(agent?.arch || '').trim().toLowerCase();
+  if (['x86_64', 'amd64', 'x64', 'linux-x64', 'linux-amd64'].includes(arch)) return 'linux-x64';
+  if (['aarch64', 'arm64', 'linux-arm64'].includes(arch)) return 'linux-arm64';
+  if (['arm', 'armv7', 'armv7l', 'linux-armv7', 'linux-armv7l'].includes(arch)) return 'linux-armv7l';
+  return '';
 }
 
 function displayRegion(node) {
@@ -189,6 +235,20 @@ function displayRegion(node) {
   if (source === 'geoip-miss') return 'GeoIP 未命中';
   if (node.network?.primaryIpv4 || node.network?.primaryIpv6) return '待手动设置区域';
   return '等待 Agent 上报';
+}
+
+function nodeRegionCode(node) {
+  const fromRegion = firstRegionCode(node.region) || firstRegionCode(node.network?.detectedRegion);
+  if (fromRegion) return fromRegion;
+  const publicAddresses = Array.isArray(node.network?.publicAddresses) ? node.network.publicAddresses : [];
+  const geo = publicAddresses.find((item) => item.countryCode);
+  return firstRegionCode(geo?.countryCode);
+}
+
+function firstRegionCode(input) {
+  const value = String(input || '').trim();
+  const match = /(?:^|\b)([A-Z]{2})(?:\b|$)/.exec(value);
+  return match ? match[1] : '';
 }
 
 function agentNodeSnapshot(node) {
@@ -540,6 +600,24 @@ function compactRegionLabel(...parts) {
     values.push({ value, normalized });
   }
   return values.map((item) => item.value).join(' · ');
+}
+
+function normalizeStringList(input) {
+  return Array.isArray(input) ? [...new Set(input.map((item) => String(item).trim()).filter(Boolean))] : [];
+}
+
+function normalizeSubscriptionFilters(input = {}) {
+  const filters = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  return {
+    nodeIds: normalizeStringList(filters.nodeIds),
+    groups: normalizeStringList(filters.groups),
+    regions: normalizeStringList(filters.regions),
+    tags: normalizeStringList(filters.tags)
+  };
+}
+
+function normalizeLinkPrefixMode(value) {
+  return ['none', 'region'].includes(value) ? value : 'region';
 }
 
 const geoIpCache = { file: '', mtimeMs: 0, entries: [] };
@@ -1224,18 +1302,21 @@ function evaluateOfflineAlerts(data) {
   return summary;
 }
 
-function subscriptionLinks(data) {
+function subscriptionLinks(data, profile = {}) {
   return data.nodes
     .filter((node) => node.subscriptionEnabled && isRecent(node.lastSeenAt, 24 * 60 * 60 * 1000))
+    .filter((node) => profileMatchesNode(profile, node))
     .flatMap((node) => {
-      if (Array.isArray(node.reportedLinks) && node.reportedLinks.length > 0) return node.reportedLinks;
+      if (Array.isArray(node.reportedLinks) && node.reportedLinks.length > 0) {
+        return node.reportedLinks.map((link) => decorateSubscriptionLink(link, node, profile));
+      }
       return [];
     })
     .filter(Boolean);
 }
 
 function renderSubscription(data, profile) {
-  const links = subscriptionLinks(data);
+  const links = subscriptionLinks(data, profile);
   if (!profile.enabled) return '# PulseDeck subscription is disabled\n';
   if (links.length === 0) return '# PulseDeck: no active node links reported yet\n';
 
@@ -1252,6 +1333,64 @@ function renderSubscription(data, profile) {
   }
 
   return `${links.join('\n')}\n`;
+}
+
+function profileMatchesNode(profile, node) {
+  const filters = normalizeSubscriptionFilters(profile.filters);
+  if (filters.nodeIds.length && !filters.nodeIds.includes(node.id)) return false;
+  if (filters.groups.length && !filters.groups.includes(node.group || '未分组')) return false;
+  const region = compactRegionLabel(node.region || node.network?.detectedRegion || '');
+  if (filters.regions.length && !filters.regions.some((item) => region.includes(item) || item.includes(region))) return false;
+  if (filters.tags.length) {
+    const nodeTags = new Set(Array.isArray(node.tags) ? node.tags : []);
+    if (!filters.tags.some((tag) => nodeTags.has(tag))) return false;
+  }
+  return true;
+}
+
+function decorateSubscriptionLink(link, node, profile) {
+  const raw = String(link || '').trim();
+  if (!raw || normalizeLinkPrefixMode(profile.linkPrefixMode) === 'none') return raw;
+  const prefix = subscriptionNodePrefix(node);
+  if (!prefix) return raw;
+  if (/^vmess:\/\//i.test(raw)) return decorateVmessLink(raw, node, prefix);
+  return decorateFragmentLink(raw, node, prefix);
+}
+
+function subscriptionNodePrefix(node) {
+  const region = compactRegionLabel(node.region || node.network?.detectedRegion || '');
+  const code = nodeRegionCode(node);
+  return compactRegionLabel(code, region) || code || region;
+}
+
+function prefixedSubscriptionName(currentName, node, prefix) {
+  const name = String(currentName || node.name || 'PulseDeck').trim();
+  if (!prefix || name.startsWith(prefix) || name.startsWith(`[${prefix}]`)) return name;
+  return `${prefix} ${name}`.trim();
+}
+
+function decorateFragmentLink(raw, node, prefix) {
+  const hashIndex = raw.indexOf('#');
+  const base = hashIndex >= 0 ? raw.slice(0, hashIndex) : raw;
+  const fragment = hashIndex >= 0 ? raw.slice(hashIndex + 1) : '';
+  let currentName = fragment || node.name;
+  try {
+    currentName = decodeURIComponent(currentName);
+  } catch {
+    // Keep the raw fragment when it is not percent-encoded.
+  }
+  return `${base}#${encodeURIComponent(prefixedSubscriptionName(currentName, node, prefix))}`;
+}
+
+function decorateVmessLink(raw, node, prefix) {
+  const encoded = raw.slice('vmess://'.length).trim();
+  try {
+    const json = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+    json.ps = prefixedSubscriptionName(json.ps, node, prefix);
+    return `vmess://${Buffer.from(JSON.stringify(json), 'utf8').toString('base64')}`;
+  } catch {
+    return decorateFragmentLink(raw, node, prefix);
+  }
 }
 
 function updateNodeFromAgent(data, node, agent, patch = {}) {
@@ -1291,6 +1430,11 @@ function updateNodeFromAgent(data, node, agent, patch = {}) {
   if (patch.arch) agent.arch = patch.arch;
   if (patch.installDir) agent.installDir = patch.installDir;
   if (patch.serviceMode) agent.serviceMode = patch.serviceMode;
+  if (patch.version && node.agentUpdate) {
+    node.agentUpdate.currentVersion = patch.version;
+    node.agentUpdate.updateAvailable = Boolean(node.agentUpdate.latestVersion && node.agentUpdate.latestVersion !== patch.version);
+    node.agentUpdate.updatedAt = timestamp;
+  }
 }
 
 function resultData(result) {
@@ -1373,6 +1517,23 @@ function applyCommandResultSideEffects(draft, command, result) {
       ...data.singBox,
       updatedAt: data.singBox.updatedAt || timestamp
     };
+    node.updatedAt = timestamp;
+  }
+
+  if (data.agentUpdate && typeof data.agentUpdate === 'object' && !Array.isArray(data.agentUpdate)) {
+    node.agentUpdate = {
+      currentVersion: String(data.agentUpdate.currentVersion || ''),
+      latestVersion: String(data.agentUpdate.latestVersion || ''),
+      target: String(data.agentUpdate.target || ''),
+      available: data.agentUpdate.available === true,
+      updateAvailable: data.agentUpdate.updateAvailable === true,
+      status: String(data.agentUpdate.status || ''),
+      message: String(data.agentUpdate.message || data.message || ''),
+      checkedAt: data.agentUpdate.checkedAt || timestamp,
+      updatedAt: data.agentUpdate.updatedAt || timestamp
+    };
+    const agent = draft.agents.find((item) => item.nodeId === node.id);
+    if (agent && data.agentUpdate.currentVersion) agent.version = String(data.agentUpdate.currentVersion);
     node.updatedAt = timestamp;
   }
 }
@@ -2435,6 +2596,8 @@ async function handleApi(req, res, store, url, realtime = {}) {
         enabled: body.enabled !== false,
         protected: false,
         description: String(body.description || '').trim(),
+        filters: normalizeSubscriptionFilters(body.filters),
+        linkPrefixMode: normalizeLinkPrefixMode(body.linkPrefixMode),
         token: randomToken(18),
         createdAt: nowIso(),
         updatedAt: nowIso()
@@ -2455,6 +2618,8 @@ async function handleApi(req, res, store, url, realtime = {}) {
       if (body.description !== undefined) profile.description = String(body.description).trim();
       if (body.enabled !== undefined) profile.enabled = body.enabled === true;
       if (body.format !== undefined && !profile.protected && ['raw', 'clash', 'v2ray'].includes(body.format)) profile.format = body.format;
+      if (body.filters !== undefined) profile.filters = normalizeSubscriptionFilters(body.filters);
+      if (body.linkPrefixMode !== undefined) profile.linkPrefixMode = normalizeLinkPrefixMode(body.linkPrefixMode);
       profile.updatedAt = nowIso();
     });
     if (!profile) return notFound(res);

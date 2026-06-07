@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const VERSION: &str = "0.2.7-rust";
+const VERSION: &str = "0.2.8-rust";
 const DEFAULT_SING_BOX_VERSION: &str = "1.11.15";
 
 #[derive(Clone, Debug)]
@@ -17,6 +17,7 @@ struct Config {
     base_url: String,
     install_id: String,
     agent_home: String,
+    agent_target: String,
     state_file: String,
     log_file: String,
     service_mode: String,
@@ -415,6 +416,8 @@ fn execute_agent_command(config: &Config, state: &State, agent_command: &AgentCo
         "diagnostics" => Ok(collect_diagnostics_json(config)),
         "metrics" | "probe" => Ok(collect_metrics_json()),
         "restart" => restart().map(|_| "{\"message\":\"Agent 已请求重启\"}".to_string()),
+        "agent-update-check" => agent_update_check_result(config),
+        "agent-update" | "agent-upgrade" => agent_update_result(config),
         "reset-links" | "protocol-add" | "protocol-delete" => render_and_apply_sing_box(config, state, agent_command),
         "sing-box-install" => install_or_update_sing_box(config, agent_command, false),
         "sing-box-reinstall" => install_or_update_sing_box(config, agent_command, true),
@@ -458,6 +461,7 @@ fn load_config() -> Result<Config, String> {
         base_url: json_get_string(&raw, "baseUrl").unwrap_or_default(),
         install_id: json_get_string(&raw, "installId").unwrap_or_default(),
         agent_home,
+        agent_target: json_get_string(&raw, "agentTarget").unwrap_or_default(),
         state_file,
         log_file,
         service_mode: json_get_string(&raw, "serviceMode").unwrap_or_else(|| "unknown".to_string()),
@@ -1095,7 +1099,7 @@ fn stop_agent_service() -> Result<(), String> {
 
 fn update_check() -> Result<(), String> {
     let config = load_config()?;
-    let target = agent_target();
+    let target = configured_agent_target(&config);
     println!("本地版本：{VERSION}");
     println!("目标包：{target}");
 
@@ -1173,10 +1177,30 @@ fn uninstall_agent(assume_yes: bool) -> Result<(), String> {
 
 fn update_self() -> Result<(), String> {
     let config = load_config()?;
+    update_self_with_config(&config).map(|outcome| {
+        println!("Agent 程序已更新，备份：{}", outcome.backup);
+        if !outcome.latest_version.is_empty() {
+            println!("更新后运行时版本：{}", blank_dash(&outcome.latest_version));
+        }
+    })
+}
+
+#[derive(Clone, Debug, Default)]
+struct AgentUpdateOutcome {
+    target: String,
+    current_version: String,
+    latest_version: String,
+    download_url: String,
+    backup: String,
+    sha256: String,
+    size_bytes: u64,
+}
+
+fn update_self_with_config(config: &Config) -> Result<AgentUpdateOutcome, String> {
     let current = env::current_exe().map_err(|error| format!("cannot resolve current executable: {error}"))?;
-    let target = agent_target();
-    let manifest = fetch_runtime_manifest(&config, &target).ok();
-    let url = runtime_download_url(&config, &target, manifest.as_ref());
+    let target = configured_agent_target(config);
+    let manifest = fetch_runtime_manifest(config, &target).ok();
+    let url = runtime_download_url(config, &target, manifest.as_ref());
     let next = format!("{}.next", current.to_string_lossy());
     let backup = format!("{}.bak", current.to_string_lossy());
     download_to(&url, &next)?;
@@ -1189,11 +1213,111 @@ fn update_self() -> Result<(), String> {
     make_executable(Path::new(&next))?;
     let _ = fs::copy(&current, &backup);
     fs::rename(&next, &current).map_err(|error| format!("cannot replace Agent binary: {error}"))?;
-    println!("Agent 程序已更新，备份：{backup}");
-    if let Some(manifest) = manifest.as_ref() {
-        println!("更新后运行时版本：{}", blank_dash(&manifest.version));
+    Ok(AgentUpdateOutcome {
+        target,
+        current_version: VERSION.to_string(),
+        latest_version: manifest.as_ref().map(|item| item.version.clone()).unwrap_or_default(),
+        download_url: url,
+        backup,
+        sha256: manifest.as_ref().map(|item| item.sha256.clone()).unwrap_or_default(),
+        size_bytes: manifest.as_ref().map(|item| item.size_bytes).unwrap_or(0),
+    })
+}
+
+fn configured_agent_target(config: &Config) -> String {
+    let configured = config.agent_target.trim();
+    if !configured.is_empty() && configured != "unsupported" {
+        configured.to_string()
+    } else {
+        agent_target().to_string()
     }
-    Ok(())
+}
+
+fn agent_update_check_result(config: &Config) -> Result<String, String> {
+    let target = configured_agent_target(config);
+    let manifest = fetch_runtime_manifest(config, &target)?;
+    let update_available = manifest.available && !manifest.version.is_empty() && manifest.version != VERSION;
+    let status = if !manifest.available {
+        "unavailable"
+    } else if update_available {
+        "update-available"
+    } else {
+        "up-to-date"
+    };
+    let message = if !manifest.available {
+        "Agent 目标包尚未发布"
+    } else if update_available {
+        "发现可更新 Agent 版本"
+    } else {
+        "Agent 已是面板发布版本"
+    };
+    Ok(agent_update_json(
+        message,
+        status,
+        &target,
+        VERSION,
+        &manifest.version,
+        manifest.available,
+        update_available,
+        manifest.size_bytes,
+        &manifest.sha256,
+        &runtime_download_url(config, &target, Some(&manifest)),
+        "",
+    ))
+}
+
+fn agent_update_result(config: &Config) -> Result<String, String> {
+    let outcome = update_self_with_config(config)?;
+    let latest = if outcome.latest_version.is_empty() {
+        outcome.current_version.as_str()
+    } else {
+        outcome.latest_version.as_str()
+    };
+    Ok(agent_update_json(
+        "Agent 程序已更新，重启 Agent 后生效",
+        "updated",
+        &outcome.target,
+        &outcome.current_version,
+        latest,
+        true,
+        false,
+        outcome.size_bytes,
+        &outcome.sha256,
+        &outcome.download_url,
+        &outcome.backup,
+    ))
+}
+
+fn agent_update_json(
+    message: &str,
+    status: &str,
+    target: &str,
+    current_version: &str,
+    latest_version: &str,
+    available: bool,
+    update_available: bool,
+    size_bytes: u64,
+    sha256: &str,
+    download_url: &str,
+    backup_path: &str,
+) -> String {
+    format!(
+        "{{\"message\":\"{}\",\"agentVersion\":\"{}\",\"agentUpdate\":{{\"status\":\"{}\",\"target\":\"{}\",\"currentVersion\":\"{}\",\"latestVersion\":\"{}\",\"available\":{},\"updateAvailable\":{},\"sizeBytes\":{},\"sha256\":\"{}\",\"downloadUrl\":\"{}\",\"backupPath\":\"{}\",\"checkedAt\":\"{}\",\"updatedAt\":\"{}\"}}}}",
+        json_escape(message),
+        json_escape(VERSION),
+        json_escape(status),
+        json_escape(target),
+        json_escape(current_version),
+        json_escape(latest_version),
+        if available { "true" } else { "false" },
+        if update_available { "true" } else { "false" },
+        size_bytes,
+        json_escape(sha256),
+        json_escape(download_url),
+        json_escape(backup_path),
+        json_escape(&now_string()),
+        json_escape(&now_string())
+    )
 }
 
 fn menu() -> Result<(), String> {

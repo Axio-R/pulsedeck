@@ -1,25 +1,58 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import {
   createPulseProfile,
   deletePulseProfile,
+  fetchPulseNodes,
   fetchPulseProfiles,
   updatePulseProfile,
+  type PulseNode,
   type PulseProfile
 } from '@/service/api';
 
 const loading = ref(false);
 const profiles = ref<PulseProfile[]>([]);
-const form = reactive<{ name: string; format: PulseProfile['format']; description: string }>({
+const nodes = ref<PulseNode[]>([]);
+const form = reactive<{
+  name: string;
+  format: PulseProfile['format'];
+  description: string;
+  linkPrefixMode: PulseProfile['linkPrefixMode'];
+  nodeIds: string[];
+  groups: string[];
+  regions: string[];
+  tags: string[];
+}>({
   name: '',
   format: 'raw',
-  description: ''
+  description: '',
+  linkPrefixMode: 'region',
+  nodeIds: [],
+  groups: [],
+  regions: [],
+  tags: []
 });
+const profileDrafts = reactive<
+  Record<string, { linkPrefixMode: PulseProfile['linkPrefixMode']; filters: PulseProfile['filters'] }>
+>({});
+
+const nodeOptions = computed(() => nodes.value.map(node => ({ label: node.name, value: node.id })));
+const groupOptions = computed(() => uniqueOptions(nodes.value.map(node => node.group || '未分组')));
+const regionOptions = computed(() => uniqueOptions(nodes.value.map(node => node.displayRegion || node.region).filter(Boolean)));
+const tagOptions = computed(() => uniqueOptions(nodes.value.flatMap(node => node.tags || [])));
+
+function uniqueOptions(values: string[]) {
+  return [...new Set(values.map(value => String(value).trim()).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b))
+    .map(value => ({ label: value, value }));
+}
 
 async function loadData() {
   loading.value = true;
   try {
-    profiles.value = (await fetchPulseProfiles()).items;
+    const [profileRes, nodeRes] = await Promise.all([fetchPulseProfiles(), fetchPulseNodes()]);
+    profiles.value = profileRes.items;
+    nodes.value = nodeRes.items;
   } finally {
     loading.value = false;
   }
@@ -29,12 +62,24 @@ async function submit() {
   const profile = await createPulseProfile({
     name: form.name || '自定义订阅',
     format: form.format,
-    description: form.description
+    description: form.description,
+    linkPrefixMode: form.linkPrefixMode,
+    filters: {
+      nodeIds: form.nodeIds,
+      groups: form.groups,
+      regions: form.regions,
+      tags: form.tags
+    }
   });
   profiles.value.unshift(profile);
   form.name = '';
   form.format = 'raw';
   form.description = '';
+  form.linkPrefixMode = 'region';
+  form.nodeIds = [];
+  form.groups = [];
+  form.regions = [];
+  form.tags = [];
   window.$message?.success('订阅已创建');
 }
 
@@ -47,6 +92,43 @@ async function remove(profile: PulseProfile) {
   await deletePulseProfile(profile.id);
   profiles.value = profiles.value.filter(item => item.id !== profile.id);
   window.$message?.success('订阅已删除');
+}
+
+function draftFor(profile: PulseProfile) {
+  if (!profileDrafts[profile.id]) {
+    profileDrafts[profile.id] = {
+      linkPrefixMode: profile.linkPrefixMode || 'region',
+      filters: {
+        nodeIds: [...(profile.filters?.nodeIds || [])],
+        groups: [...(profile.filters?.groups || [])],
+        regions: [...(profile.filters?.regions || [])],
+        tags: [...(profile.filters?.tags || [])]
+      }
+    };
+  }
+  return profileDrafts[profile.id];
+}
+
+async function saveProfileFilters(profile: PulseProfile) {
+  const draft = draftFor(profile);
+  const next = await updatePulseProfile(profile.id, {
+    linkPrefixMode: draft.linkPrefixMode,
+    filters: draft.filters
+  });
+  profiles.value = profiles.value.map(item => (item.id === profile.id ? next : item));
+  delete profileDrafts[profile.id];
+  window.$message?.success('订阅过滤已保存');
+}
+
+function filterSummary(profile: PulseProfile) {
+  const filters = profile.filters;
+  const parts = [
+    filters?.nodeIds?.length ? `节点 ${filters.nodeIds.length}` : '',
+    filters?.groups?.length ? `分组 ${filters.groups.join('/')}` : '',
+    filters?.regions?.length ? `区域 ${filters.regions.join('/')}` : '',
+    filters?.tags?.length ? `标签 ${filters.tags.join('/')}` : ''
+  ].filter(Boolean);
+  return parts.join(' · ') || '全部在线节点';
 }
 
 async function copyUrl(url: string) {
@@ -80,6 +162,27 @@ onMounted(loadData);
         <NGi span="24 s:3">
           <NButton type="primary" block @click="submit">创建</NButton>
         </NGi>
+        <NGi span="24 s:5">
+          <NSelect
+            v-model:value="form.linkPrefixMode"
+            :options="[
+              { label: '地区前缀', value: 'region' },
+              { label: '不加前缀', value: 'none' }
+            ]"
+          />
+        </NGi>
+        <NGi span="24 s:5">
+          <NSelect v-model:value="form.nodeIds" multiple clearable filterable :options="nodeOptions" placeholder="指定节点" />
+        </NGi>
+        <NGi span="24 s:5">
+          <NSelect v-model:value="form.groups" multiple clearable filterable :options="groupOptions" placeholder="筛选分组" />
+        </NGi>
+        <NGi span="24 s:5">
+          <NSelect v-model:value="form.regions" multiple clearable filterable :options="regionOptions" placeholder="筛选区域" />
+        </NGi>
+        <NGi span="24 s:4">
+          <NSelect v-model:value="form.tags" multiple clearable filterable :options="tagOptions" placeholder="筛选标签" />
+        </NGi>
       </NGrid>
     </NCard>
 
@@ -91,10 +194,34 @@ onMounted(loadData);
               <NTag size="small">{{ profile.format }}</NTag>
             </template>
           </NThing>
+          <div class="profile-meta">
+            <NTag size="small" :bordered="false">{{ profile.linkPrefixMode === 'region' ? '地区前缀' : '无前缀' }}</NTag>
+            <NText depth="3">{{ filterSummary(profile) }}</NText>
+          </div>
           <NInput class="mt-12px" :value="profile.publicUrl" readonly />
           <NSpace class="mt-12px">
             <NButton size="small" @click="copyUrl(profile.publicUrl)">复制</NButton>
             <NButton size="small" tag="a" :href="profile.publicUrl" target="_blank">打开</NButton>
+            <NPopover trigger="click" placement="top">
+              <template #trigger>
+                <NButton size="small" secondary>过滤</NButton>
+              </template>
+              <NSpace vertical :size="8" class="profile-filter-popover">
+                <NSelect
+                  v-model:value="draftFor(profile).linkPrefixMode"
+                  size="small"
+                  :options="[
+                    { label: '地区前缀', value: 'region' },
+                    { label: '不加前缀', value: 'none' }
+                  ]"
+                />
+                <NSelect v-model:value="draftFor(profile).filters.nodeIds" size="small" multiple clearable filterable :options="nodeOptions" placeholder="指定节点" />
+                <NSelect v-model:value="draftFor(profile).filters.groups" size="small" multiple clearable filterable :options="groupOptions" placeholder="筛选分组" />
+                <NSelect v-model:value="draftFor(profile).filters.regions" size="small" multiple clearable filterable :options="regionOptions" placeholder="筛选区域" />
+                <NSelect v-model:value="draftFor(profile).filters.tags" size="small" multiple clearable filterable :options="tagOptions" placeholder="筛选标签" />
+                <NButton size="small" type="primary" @click="saveProfileFilters(profile)">保存过滤</NButton>
+              </NSpace>
+            </NPopover>
             <NSwitch :value="profile.enabled" @update:value="value => toggle(profile, value)" />
             <NPopconfirm v-if="profile.deletable" @positive-click="remove(profile)">
               <template #trigger>
@@ -109,3 +236,24 @@ onMounted(loadData);
     </NGrid>
   </NSpace>
 </template>
+
+<style scoped>
+.profile-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-top: 8px;
+}
+
+.profile-meta :deep(.n-text) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-filter-popover {
+  width: min(360px, calc(100vw - 48px));
+}
+</style>

@@ -19,7 +19,9 @@ export const DEFAULT_SUBSCRIPTION_PROFILES = [
     format: 'raw',
     enabled: true,
     protected: true,
-    description: '通用原始链接订阅'
+    description: '通用原始链接订阅',
+    filters: {},
+    linkPrefixMode: 'region'
   },
   {
     id: 'default-clash',
@@ -27,7 +29,9 @@ export const DEFAULT_SUBSCRIPTION_PROFILES = [
     format: 'clash',
     enabled: true,
     protected: true,
-    description: 'Clash provider 输出'
+    description: 'Clash provider 输出',
+    filters: {},
+    linkPrefixMode: 'region'
   },
   {
     id: 'default-v2ray',
@@ -35,7 +39,9 @@ export const DEFAULT_SUBSCRIPTION_PROFILES = [
     format: 'v2ray',
     enabled: true,
     protected: true,
-    description: 'Base64 链接订阅'
+    description: 'Base64 链接订阅',
+    filters: {},
+    linkPrefixMode: 'region'
   }
 ];
 
@@ -91,6 +97,24 @@ function normalizeTraffic(input = {}) {
     lastResetAt: input.lastResetAt || null,
     updatedAt: input.updatedAt || null
   };
+}
+
+function normalizeStringList(input) {
+  return Array.isArray(input) ? [...new Set(input.map((item) => String(item).trim()).filter(Boolean))] : [];
+}
+
+function normalizeSubscriptionFilters(input = {}) {
+  const filters = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  return {
+    nodeIds: normalizeStringList(filters.nodeIds),
+    groups: normalizeStringList(filters.groups),
+    regions: normalizeStringList(filters.regions),
+    tags: normalizeStringList(filters.tags)
+  };
+}
+
+function normalizeLinkPrefixMode(value) {
+  return ['none', 'region'].includes(value) ? value : 'region';
 }
 
 function normalizeNetwork(input = {}) {
@@ -264,6 +288,8 @@ export function hydrateData(input) {
         ...defaultProfile,
         ...existing,
         protected: true,
+        filters: normalizeSubscriptionFilters(existing.filters),
+        linkPrefixMode: normalizeLinkPrefixMode(existing.linkPrefixMode),
         token: existing.token || randomToken(18),
         createdAt: existing.createdAt || now,
         updatedAt: existing.updatedAt || now
@@ -277,6 +303,13 @@ export function hydrateData(input) {
       });
     }
   }
+
+  hydrated.subscriptionProfiles = hydrated.subscriptionProfiles.map((profile) => ({
+    ...profile,
+    filters: normalizeSubscriptionFilters(profile.filters),
+    linkPrefixMode: normalizeLinkPrefixMode(profile.linkPrefixMode),
+    description: String(profile.description || '').trim()
+  }));
 
   hydrated.nodes = hydrated.nodes.map((node) => ({
     id: node.id || randomUUID(),
@@ -295,6 +328,20 @@ export function hydrateData(input) {
     metrics: node.metrics || null,
     diagnostics: node.diagnostics || null,
     reportedLinks: Array.isArray(node.reportedLinks) ? node.reportedLinks : [],
+    agentUpdate:
+      node.agentUpdate && typeof node.agentUpdate === 'object' && !Array.isArray(node.agentUpdate)
+        ? {
+            currentVersion: String(node.agentUpdate.currentVersion || ''),
+            latestVersion: String(node.agentUpdate.latestVersion || ''),
+            target: String(node.agentUpdate.target || ''),
+            available: node.agentUpdate.available === true,
+            updateAvailable: node.agentUpdate.updateAvailable === true,
+            status: String(node.agentUpdate.status || ''),
+            message: String(node.agentUpdate.message || ''),
+            checkedAt: node.agentUpdate.checkedAt || null,
+            updatedAt: node.agentUpdate.updatedAt || null
+          }
+        : null,
     linkSecret: node.linkSecret || randomToken(18),
     protocols: Array.isArray(node.protocols) ? node.protocols.map(createNodeProtocol) : [],
     network: normalizeNetwork(node.network),
@@ -415,6 +462,7 @@ export function createNode(input = {}) {
     metrics: null,
     diagnostics: null,
     reportedLinks: [],
+    agentUpdate: null,
     linkSecret: randomToken(18),
     protocols: Array.isArray(input.protocols) ? input.protocols.map(createNodeProtocol) : [],
     network: normalizeNetwork({ regionSource: String(input.region || '').trim() ? 'manual' : 'auto-pending' }),

@@ -57,6 +57,8 @@ export interface PulseNode {
   name: string;
   region: string;
   displayRegion: string;
+  regionCode: string;
+  regionIcon: string;
   regionOverride: boolean;
   group: string;
   order: number;
@@ -74,6 +76,41 @@ export interface PulseNode {
   };
   diagnostics: null | { checks?: Array<{ name: string; ok: boolean; detail?: string }> };
   reportedLinks: string[];
+  agentUpdate: null | {
+    currentVersion: string;
+    latestVersion: string;
+    target: string;
+    available: boolean;
+    updateAvailable: boolean;
+    status: string;
+    message: string;
+    checkedAt: string | null;
+    updatedAt: string | null;
+  };
+  agent: {
+    id: string | null;
+    version: string;
+    platform: string;
+    arch: string;
+    target: string;
+    installDir: string;
+    serviceMode: string;
+    lastSeenAt: string | null;
+    latestVersion: string;
+    runtimeAvailable: boolean;
+    updateAvailable: boolean;
+    update: {
+      currentVersion?: string;
+      latestVersion?: string;
+      target?: string;
+      available?: boolean;
+      updateAvailable?: boolean;
+      status?: string;
+      message?: string;
+      checkedAt?: string | null;
+      updatedAt?: string | null;
+    };
+  };
   linkSecret: string;
   protocols: PulseNodeProtocol[];
   singBox: {
@@ -264,6 +301,13 @@ export interface PulseProfile {
   protected: boolean;
   deletable: boolean;
   description: string;
+  filters: {
+    nodeIds: string[];
+    groups: string[];
+    regions: string[];
+    tags: string[];
+  };
+  linkPrefixMode: 'none' | 'region';
   publicUrl: string;
   createdAt: string;
   updatedAt: string;
@@ -430,11 +474,16 @@ export function fetchPulseProfiles() {
   return pulseFetch<{ items: PulseProfile[] }>('/subscription-profiles');
 }
 
-export function createPulseProfile(body: { name: string; format: PulseProfile['format']; description?: string }) {
+export function createPulseProfile(
+  body: { name: string; format: PulseProfile['format']; description?: string } & Partial<Pick<PulseProfile, 'filters' | 'linkPrefixMode'>>
+) {
   return pulseFetch<PulseProfile>('/subscription-profiles', { method: 'POST', body });
 }
 
-export function updatePulseProfile(id: string, body: Partial<Pick<PulseProfile, 'name' | 'format' | 'enabled' | 'description'>>) {
+export function updatePulseProfile(
+  id: string,
+  body: Partial<Pick<PulseProfile, 'name' | 'format' | 'enabled' | 'description' | 'filters' | 'linkPrefixMode'>>
+) {
   return pulseFetch<PulseProfile>(`/subscription-profiles/${id}`, { method: 'PATCH', body });
 }
 

@@ -86,6 +86,29 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 ### 2026-06-07
 
 - Implementation direction for this turn:
+  - Continue from target 4: improve subscription distribution without making the panel heavy.
+  - Add panel-visible Agent version state, remote Agent update check, and remote Agent binary update commands.
+  - Add compact region icons/markers to node management and add region prefixes to subscription link names.
+  - Add subscription Profile filters for nodes, groups, regions, and tags.
+  - Prepare the project metadata for `v0.2.8`.
+- Implementation completed before commit:
+  - Bumped panel and Agent metadata to `0.2.8` / `0.2.8-rust`.
+  - Added node Agent metadata in the API response, including current version, inferred runtime target, latest panel Agent version, runtime availability, and update availability.
+  - Added Rust Agent remote commands `agent-update-check` and `agent-update`; the update command replaces the Agent binary and reports that a restart is needed for the running process to switch versions.
+  - Made the Rust Agent read the installer-provided `agentTarget` from config for update checks and updates.
+  - Added node-table and node-card Agent controls for check/update/restart, plus batch Agent check/update actions.
+  - Added compact region-code markers to node table/card region display.
+  - Added subscription Profile filters and region-prefix handling for raw/V2Ray links, including VMess `ps` rewriting and standard URL fragment rewriting.
+  - Updated the Subscriptions page with Profile filter controls and region-prefix mode.
+- Local verification before commit:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 14 tests including Agent update metadata and subscription region-prefix filtering.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `git diff --check`: passed after cleaning generated router typing whitespace.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine still has no `cargo`; `rustc --version` is also unavailable, so Rust compilation must be validated by GitHub Actions/GHCR.
+
+- Implementation direction for this turn:
   - Fix the live node issues reported from a WARP IPv4 plus native IPv6 VPS.
   - Remove duplicated region components such as `HK · Hong Kong · Hong Kong`.
   - Keep native IPv4, native IPv6, WARP IPv4, and WARP IPv6 distinct in API data and node card display.

@@ -77,6 +77,9 @@ function commandLabel(type: string) {
   const labels: Record<string, string> = {
     probe: '探测',
     diagnostics: '诊断',
+    restart: '重启 Agent',
+    'agent-update-check': '检查 Agent',
+    'agent-update': '更新 Agent',
     'sing-box-render': '渲染配置',
     'sing-box-apply': '应用配置',
     'sing-box-restart': '重启 sing-box',
