@@ -17,7 +17,7 @@ const DEFAULT_GEOIP_FILE = path.join(ROOT_DIR, 'geoip.json');
 const DEFAULT_GEOSITE_FILE = path.join(ROOT_DIR, 'geosite.json');
 const PORT = Number(process.env.PULSEDECK_PORT || 14770);
 const HOST = process.env.PULSEDECK_HOST || '0.0.0.0';
-const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.6';
+const APP_VERSION = process.env.PULSEDECK_VERSION || '0.2.7';
 const AGENT_VERSION = process.env.PULSEDECK_AGENT_VERSION || `${APP_VERSION}-rust`;
 const AGENT_RUNTIME_TARGETS = ['linux-x64', 'linux-arm64', 'linux-armv7l'];
 const ADMIN_USER = process.env.PULSEDECK_ADMIN_USER || 'admin';
@@ -174,6 +174,7 @@ function presentProfile(profile, req) {
 function presentNode(node, req, data) {
   return {
     ...node,
+    region: compactRegionLabel(node.region),
     online: isNodeOnline(node, data),
     displayRegion: displayRegion(node),
     installCommand: `curl -fsSL '${publicBaseUrl(req)}/api/v1/agents/install/${encodeURIComponent(node.installId)}' | sh`
@@ -181,8 +182,8 @@ function presentNode(node, req, data) {
 }
 
 function displayRegion(node) {
-  if (node.region) return node.region;
-  if (node.network?.detectedRegion) return node.network.detectedRegion;
+  if (node.region) return compactRegionLabel(node.region);
+  if (node.network?.detectedRegion) return compactRegionLabel(node.network.detectedRegion);
   const source = node.network?.regionSource || '';
   if (source === 'geoip-empty') return 'GeoIP 未配置';
   if (source === 'geoip-miss') return 'GeoIP 未命中';
@@ -476,7 +477,8 @@ function addressesFromAgent(input, req) {
       interface: 'remote',
       family: net.isIP(remote) === 6 ? 'ipv6' : 'ipv4',
       address: remote,
-      cidr: ''
+      cidr: '',
+      source: 'panel-remote'
     });
   }
   const seen = new Set();
@@ -514,6 +516,30 @@ function isPublicAddress(item) {
   if (item.family === 'ipv4') return !isPrivateIpv4(item.address);
   if (item.family === 'ipv6') return !isPrivateIpv6(item.address);
   return false;
+}
+
+function isWarpAddress(item) {
+  return /warp|wgcf|cloudflare|wireguard|^wg/i.test(item.interface || '') || /warp/i.test(item.source || '');
+}
+
+function isRemoteAddress(item) {
+  return item.interface === 'remote' || item.source === 'panel-remote';
+}
+
+function isPublicLookupAddress(item) {
+  return /^public-lookup/i.test(item.interface || '') || /^agent-public/i.test(item.source || '');
+}
+
+function compactRegionLabel(...parts) {
+  const values = [];
+  for (const part of parts.flatMap((item) => String(item || '').split(/\s*·\s*/))) {
+    const value = part.trim();
+    if (!value) continue;
+    const normalized = value.toLowerCase().replace(/\s+/g, ' ');
+    if (values.some((item) => item.normalized === normalized)) continue;
+    values.push({ value, normalized });
+  }
+  return values.map((item) => item.value).join(' · ');
 }
 
 const geoIpCache = { file: '', mtimeMs: 0, entries: [] };
@@ -625,23 +651,35 @@ function lookupGeosite(domain) {
 function analyzeAddresses(addresses = []) {
   const normalized = addresses.map(normalizeAddressItem).filter(Boolean);
   const publicAddresses = normalized.filter(isPublicAddress);
-  const publicIpv4 = publicAddresses.find((item) => item.family === 'ipv4') || null;
-  const publicIpv6 = publicAddresses.find((item) => item.family === 'ipv6') || null;
+  const nativePublicIpv4 = publicAddresses.find((item) => item.family === 'ipv4' && !isWarpAddress(item) && !isRemoteAddress(item) && !isPublicLookupAddress(item)) || null;
+  const nativePublicIpv6 = publicAddresses.find((item) => item.family === 'ipv6' && !isWarpAddress(item) && !isRemoteAddress(item) && !isPublicLookupAddress(item)) || null;
+  const remoteIpv4 = publicAddresses.find((item) => item.family === 'ipv4' && isRemoteAddress(item)) || null;
+  const remoteIpv6 = publicAddresses.find((item) => item.family === 'ipv6' && isRemoteAddress(item)) || null;
+  const lookupIpv4 = publicAddresses.find((item) => item.family === 'ipv4' && isPublicLookupAddress(item)) || null;
+  const lookupIpv6 = publicAddresses.find((item) => item.family === 'ipv6' && isPublicLookupAddress(item)) || null;
+  const publicWarpIpv4 = publicAddresses.find((item) => item.family === 'ipv4' && isWarpAddress(item)) || null;
+  const publicWarpIpv6 = publicAddresses.find((item) => item.family === 'ipv6' && isWarpAddress(item)) || null;
+  const publicIpv4 = nativePublicIpv4 || lookupIpv4 || remoteIpv4 || publicWarpIpv4 || publicAddresses.find((item) => item.family === 'ipv4') || null;
+  const publicIpv6 = nativePublicIpv6 || lookupIpv6 || remoteIpv6 || publicWarpIpv6 || publicAddresses.find((item) => item.family === 'ipv6') || null;
   const anyIpv4 = normalized.find((item) => item.family === 'ipv4') || null;
   const anyIpv6 = normalized.find((item) => item.family === 'ipv6') || null;
-  const warpLikely = normalized.some((item) => /warp|wgcf|cloudflare|wireguard|^wg/i.test(item.interface)) || (!publicIpv4 && anyIpv4 && publicIpv6);
-  const primaryIpv4 = publicIpv4?.address || anyIpv4?.address || null;
-  const primaryIpv6 = publicIpv6?.address || anyIpv6?.address || null;
+  const privateWarpIpv4 = normalized.find((item) => item.family === 'ipv4' && isWarpAddress(item) && !isPublicAddress(item)) || null;
+  const hasWarpInterface = normalized.some(isWarpAddress);
+  const warpLikely = hasWarpInterface || (!nativePublicIpv4 && nativePublicIpv6 && Boolean(remoteIpv4 || lookupIpv4));
+  const warpIpv4 = warpLikely ? publicWarpIpv4?.address || remoteIpv4?.address || lookupIpv4?.address || null : null;
+  const warpIpv6 = warpLikely ? publicWarpIpv6?.address || null : null;
+  const primaryIpv4 = nativePublicIpv4?.address || (!warpLikely ? publicIpv4?.address || anyIpv4?.address || null : null);
+  const primaryIpv6 = nativePublicIpv6?.address || (!warpLikely ? publicIpv6?.address || anyIpv6?.address || null : publicIpv6?.address || anyIpv6?.address || null);
   let ipMode = 'unknown';
-  if (warpLikely && anyIpv4 && publicIpv6) ipMode = 'warp-v4-ipv6';
-  else if (publicIpv4 && publicIpv6) ipMode = 'dual-stack';
-  else if (publicIpv4) ipMode = 'ipv4-only';
-  else if (publicIpv6) ipMode = 'ipv6-only';
+  if (warpLikely && (warpIpv4 || privateWarpIpv4) && primaryIpv6) ipMode = 'warp-v4-ipv6';
+  else if (primaryIpv4 && primaryIpv6) ipMode = 'dual-stack';
+  else if (primaryIpv4) ipMode = 'ipv4-only';
+  else if (primaryIpv6) ipMode = 'ipv6-only';
   else if (anyIpv4 && anyIpv6) ipMode = 'private-dual-stack';
   else if (anyIpv4) ipMode = 'private-ipv4';
   else if (anyIpv6) ipMode = 'private-ipv6';
 
-  const lookupIp = publicIpv4?.address || publicIpv6?.address || '';
+  const lookupIp = primaryIpv4 || primaryIpv6 || warpIpv4 || publicIpv4?.address || publicIpv6?.address || '';
   let geo = lookupIp ? detectGeoRegion(lookupIp) : { region: '', countryCode: '', city: '', source: 'auto-pending' };
   const agentGeo = publicAddresses.find((item) => item.region || item.countryCode || item.city);
   if (!geo.region && agentGeo) {
@@ -655,6 +693,8 @@ function analyzeAddresses(addresses = []) {
   return {
     primaryIpv4,
     primaryIpv6,
+    warpIpv4,
+    warpIpv6,
     ipMode,
     publicAddresses,
     warpLikely,
@@ -665,7 +705,7 @@ function analyzeAddresses(addresses = []) {
 }
 
 function agentRegionLabel(item) {
-  return [item.countryCode, item.region, item.city].filter(Boolean).join(' · ') || item.region || item.countryCode || item.city || '';
+  return compactRegionLabel(item.countryCode, item.region, item.city) || item.region || item.countryCode || item.city || '';
 }
 
 function applyNetworkDiscovery(node, addresses) {
@@ -675,7 +715,7 @@ function applyNetworkDiscovery(node, addresses) {
   const analysis = analyzeAddresses(normalized);
   node.network = { ...(node.network || {}), ...analysis };
   if (!node.regionOverride && analysis.detectedRegion) {
-    node.region = analysis.detectedRegion;
+    node.region = compactRegionLabel(analysis.detectedRegion);
   }
 }
 

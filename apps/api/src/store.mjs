@@ -97,6 +97,8 @@ function normalizeNetwork(input = {}) {
   return {
     primaryIpv4: input.primaryIpv4 || null,
     primaryIpv6: input.primaryIpv6 || null,
+    warpIpv4: input.warpIpv4 || null,
+    warpIpv6: input.warpIpv6 || null,
     ipMode: input.ipMode || 'unknown',
     publicAddresses: Array.isArray(input.publicAddresses) ? input.publicAddresses : [],
     warpLikely: input.warpLikely === true,

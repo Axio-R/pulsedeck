@@ -42,6 +42,7 @@ type NodeIpRow = { label: string; value: string; tone: 'warp' | 'ipv4' | 'ipv6' 
 type TrafficSample = { time: number; rx: number; tx: number };
 type TrafficSocketState = 'connecting' | 'live' | 'reconnecting' | 'offline';
 
+const defaultSingBoxVersion = '1.11.15';
 const trafficHistoryLimit = 60;
 const loading = ref(false);
 const nodes = ref<PulseNode[]>([]);
@@ -331,7 +332,7 @@ async function copyIpValue(value: string) {
 function singBoxDraftFor(node: PulseNode) {
   if (!singBoxDrafts[node.id]) {
     singBoxDrafts[node.id] = {
-      version: '',
+      version: defaultSingBoxVersion,
       downloadUrl: '',
       sha256: ''
     };
@@ -342,7 +343,7 @@ function singBoxDraftFor(node: PulseNode) {
 async function queueSingBoxInstall(node: PulseNode, reinstall = false) {
   const draft = singBoxDraftFor(node);
   const payload: Record<string, string> = {};
-  if (draft.version.trim()) payload.version = draft.version.trim().replace(/^v/, '');
+  payload.version = (draft.version.trim() || defaultSingBoxVersion).replace(/^v/, '');
   if (draft.downloadUrl.trim()) payload.downloadUrl = draft.downloadUrl.trim();
   if (draft.sha256.trim()) payload.sha256 = draft.sha256.trim();
   await queuePulseCommand(node.id, reinstall ? 'sing-box-reinstall' : 'sing-box-install', payload);
@@ -489,34 +490,42 @@ function displayNodeRegion(node: PulseNode) {
 
 function nodeIpRows(node: PulseNode): NodeIpRow[] {
   const rows: NodeIpRow[] = [];
-  const addresses = node.addresses || [];
-  const publicAddresses = node.network?.publicAddresses || [];
-  const firstAddress = (family: 'ipv4' | 'ipv6') =>
-    publicAddresses.find(item => item.family === family)?.address || addresses.find(item => item.family === family)?.address || '';
-  const warpAddresses = addresses
+  const warpAddresses = (node.addresses || [])
     .filter(item => /warp|wgcf|wireguard|^wg/i.test(item.interface || ''))
     .map(item => item.address)
+    .filter(address => address && !isPrivateDisplayIp(address))
+    .filter(Boolean);
+  const warpPublicAddresses = [node.network?.warpIpv4, node.network?.warpIpv6]
     .filter(Boolean);
 
-  if (node.network?.warpLikely || warpAddresses.length) {
-    const value = warpAddresses.length
-      ? [...new Set(warpAddresses)].join(' / ')
-      : [node.network?.primaryIpv4, node.network?.primaryIpv6].filter(Boolean).join(' / ') || '已识别';
+  if (node.network?.warpLikely || warpPublicAddresses.length || warpAddresses.length) {
+    const value = [...new Set([...warpPublicAddresses, ...warpAddresses])].join(' / ') || '已识别';
     rows.push({ label: 'WARP', value, tone: 'warp' });
   }
 
   rows.push({
     label: 'IPv4',
-    value: node.network?.primaryIpv4 || firstAddress('ipv4') || '-',
-    tone: node.network?.primaryIpv4 || firstAddress('ipv4') ? 'ipv4' : 'muted'
+    value: node.network?.primaryIpv4 || '-',
+    tone: node.network?.primaryIpv4 ? 'ipv4' : 'muted'
   });
   rows.push({
     label: 'IPv6',
-    value: node.network?.primaryIpv6 || firstAddress('ipv6') || '-',
-    tone: node.network?.primaryIpv6 || firstAddress('ipv6') ? 'ipv6' : 'muted'
+    value: node.network?.primaryIpv6 || '-',
+    tone: node.network?.primaryIpv6 ? 'ipv6' : 'muted'
   });
 
   return rows;
+}
+
+function isPrivateDisplayIp(address: string) {
+  if (address.includes(':')) {
+    const lower = address.toLowerCase();
+    return lower === '::1' || lower.startsWith('fe80:') || lower.startsWith('fc') || lower.startsWith('fd');
+  }
+  const parts = address.split('.').map(part => Number(part));
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part))) return true;
+  const [a, b] = parts;
+  return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
 }
 
 function commandLabel(type: string) {

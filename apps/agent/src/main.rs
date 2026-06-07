@@ -9,7 +9,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const VERSION: &str = "0.2.6-rust";
+const VERSION: &str = "0.2.7-rust";
+const DEFAULT_SING_BOX_VERSION: &str = "1.11.15";
 
 #[derive(Clone, Debug)]
 struct Config {
@@ -575,7 +576,7 @@ fn collect_addresses_json() -> String {
         }
     }
 
-    if let Some(geo) = public_geo() {
+    for geo in public_geos() {
         if !geo.ip.trim().is_empty() && !rows.iter().any(|row| row.contains(&format!("\"address\":\"{}\"", json_escape(&geo.ip)))) {
             rows.push(public_geo_address_json(&geo));
         }
@@ -586,6 +587,38 @@ fn collect_addresses_json() -> String {
     } else {
         format!("[{}]", rows.join(","))
     }
+}
+
+fn public_geos() -> Vec<PublicGeo> {
+    if env::var("PULSEDECK_PUBLIC_GEO")
+        .map(|value| matches!(value.as_str(), "0" | "false" | "off" | "disabled"))
+        .unwrap_or(false)
+    {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    for family in ["4", "6"] {
+        if let Some(cached) = read_public_geo_cache_for(family) {
+            rows.push(cached);
+            continue;
+        }
+        if let Some(geo) = fetch_public_geo_family(family) {
+            write_public_geo_cache_for(family, &geo);
+            rows.push(geo);
+        }
+    }
+    if rows.is_empty() {
+        if let Some(geo) = public_geo() {
+            rows.push(geo);
+        }
+    }
+    let mut unique = Vec::new();
+    for row in rows {
+        if !unique.iter().any(|item: &PublicGeo| item.ip == row.ip) {
+            unique.push(row);
+        }
+    }
+    unique
 }
 
 fn public_geo() -> Option<PublicGeo> {
@@ -601,6 +634,28 @@ fn public_geo() -> Option<PublicGeo> {
     let geo = fetch_public_geo()?;
     write_public_geo_cache(&geo);
     Some(geo)
+}
+
+fn read_public_geo_cache_for(family: &str) -> Option<PublicGeo> {
+    let raw = fs::read_to_string(public_geo_cache_file_for(family)).ok()?;
+    let cached_at = json_get_number(&raw, "cachedAt").unwrap_or(0);
+    let now = unix_seconds();
+    if cached_at == 0 || now.saturating_sub(cached_at) > 21_600 {
+        return None;
+    }
+    let geo = PublicGeo {
+        ip: json_get_string(&raw, "ip").unwrap_or_default(),
+        region: json_get_string(&raw, "region").unwrap_or_default(),
+        country_code: json_get_string(&raw, "countryCode").unwrap_or_default(),
+        city: json_get_string(&raw, "city").unwrap_or_default(),
+        source: json_get_string(&raw, "source").unwrap_or_else(|| format!("agent-public-ipv{family}")),
+        cached_at,
+    };
+    if geo.ip.trim().is_empty() {
+        None
+    } else {
+        Some(geo)
+    }
 }
 
 fn read_public_geo_cache() -> Option<PublicGeo> {
@@ -626,11 +681,26 @@ fn read_public_geo_cache() -> Option<PublicGeo> {
 }
 
 fn fetch_public_geo() -> Option<PublicGeo> {
+    fetch_public_geo_with_args(&[], "agent-public-lookup")
+}
+
+fn fetch_public_geo_family(family: &str) -> Option<PublicGeo> {
+    match family {
+        "4" => fetch_public_geo_with_args(&["-4"], "agent-public-ipv4"),
+        "6" => fetch_public_geo_with_args(&["-6"], "agent-public-ipv6"),
+        _ => None,
+    }
+}
+
+fn fetch_public_geo_with_args(extra_args: &[&str], source: &str) -> Option<PublicGeo> {
     if !command_exists("curl") {
         return None;
     }
-    let output = Command::new("curl")
-        .args(["-fsS", "--max-time", "2", "https://ipapi.co/json/"])
+    let mut command = Command::new("curl");
+    command.args(["-fsS", "--max-time", "2"]);
+    command.args(extra_args);
+    let output = command
+        .arg("https://ipapi.co/json/")
         .output()
         .ok()?;
     if !output.status.success() {
@@ -651,7 +721,7 @@ fn fetch_public_geo() -> Option<PublicGeo> {
             .or_else(|| json_get_string(&raw, "country"))
             .unwrap_or_default(),
         city: json_get_string(&raw, "city").unwrap_or_default(),
-        source: "agent-public-lookup".to_string(),
+        source: source.to_string(),
         cached_at: unix_seconds(),
     })
 }
@@ -675,22 +745,55 @@ fn write_public_geo_cache(geo: &PublicGeo) {
     );
 }
 
+fn write_public_geo_cache_for(family: &str, geo: &PublicGeo) {
+    let file = public_geo_cache_file_for(family);
+    if let Some(parent) = file.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(
+        file,
+        format!(
+            "{{\"ip\":\"{}\",\"region\":\"{}\",\"countryCode\":\"{}\",\"city\":\"{}\",\"source\":\"{}\",\"cachedAt\":{}}}\n",
+            json_escape(&geo.ip),
+            json_escape(&geo.region),
+            json_escape(&geo.country_code),
+            json_escape(&geo.city),
+            json_escape(&geo.source),
+            geo.cached_at
+        ),
+    );
+}
+
 fn public_geo_cache_file() -> PathBuf {
+    public_geo_cache_base_file("public-geo.json")
+}
+
+fn public_geo_cache_file_for(family: &str) -> PathBuf {
+    public_geo_cache_base_file(&format!("public-geo-ipv{family}.json"))
+}
+
+fn public_geo_cache_base_file(name: &str) -> PathBuf {
     if let Ok(home) = env::var("PULSEDECK_AGENT_HOME") {
         if !home.trim().is_empty() {
-            return Path::new(&home).join("state/public-geo.json");
+            return Path::new(&home).join("state").join(name);
         }
     }
     let config_path = find_config_path();
     let raw = fs::read_to_string(&config_path).unwrap_or_default();
     let agent_home = json_get_string(&raw, "agentHome").unwrap_or_else(|| parent_parent(&config_path));
-    Path::new(&agent_home).join("state/public-geo.json")
+    Path::new(&agent_home).join("state").join(name)
 }
 
 fn public_geo_address_json(geo: &PublicGeo) -> String {
     let family = if geo.ip.contains(':') { "ipv6" } else { "ipv4" };
+    let interface = if family == "ipv4" {
+        "public-lookup-ipv4"
+    } else {
+        "public-lookup-ipv6"
+    };
     format!(
-        "{{\"interface\":\"public-lookup\",\"family\":\"{}\",\"address\":\"{}\",\"cidr\":\"\",\"region\":\"{}\",\"countryCode\":\"{}\",\"city\":\"{}\",\"source\":\"{}\"}}",
+        "{{\"interface\":\"{}\",\"family\":\"{}\",\"address\":\"{}\",\"cidr\":\"\",\"region\":\"{}\",\"countryCode\":\"{}\",\"city\":\"{}\",\"source\":\"{}\"}}",
+        json_escape(interface),
         family,
         json_escape(&geo.ip),
         json_escape(&geo.region),
@@ -1558,7 +1661,7 @@ fn select_sing_box_download_url(agent_command: &AgentCommand) -> Result<String, 
 
     let version = json_get_string(&agent_command.payload_json, "version")
         .or_else(|| env::var("PULSEDECK_SING_BOX_VERSION").ok())
-        .unwrap_or_default()
+        .unwrap_or_else(|| DEFAULT_SING_BOX_VERSION.to_string())
         .trim_start_matches('v')
         .to_string();
     if version.is_empty() {
@@ -1568,8 +1671,13 @@ fn select_sing_box_download_url(agent_command: &AgentCommand) -> Result<String, 
         .or_else(|| env::var("PULSEDECK_SING_BOX_TARGET").ok())
         .unwrap_or_else(|| env::consts::ARCH.to_string());
     let arch = sing_box_release_arch(target.trim())?;
+    let release_base = json_get_string(&agent_command.payload_json, "releaseBaseUrl")
+        .or_else(|| env::var("PULSEDECK_SING_BOX_RELEASE_BASE").ok())
+        .unwrap_or_else(|| "https://github.com/SagerNet/sing-box/releases/download".to_string())
+        .trim_end_matches('/')
+        .to_string();
     Ok(format!(
-        "https://github.com/SagerNet/sing-box/releases/download/v{version}/sing-box-{version}-linux-{arch}.tar.gz"
+        "{release_base}/v{version}/sing-box-{version}-linux-{arch}.tar.gz"
     ))
 }
 
@@ -1756,7 +1864,7 @@ fn install_or_update_sing_box(config: &Config, agent_command: &AgentCommand, rei
 
     let download_url = select_sing_box_download_url(agent_command)?;
     if download_url.is_empty() {
-        return Err("未找到 sing-box 可执行文件；请提供 payload.downloadUrl、payload.version、PULSEDECK_SING_BOX_DOWNLOAD_URL 或 PULSEDECK_SING_BOX_VERSION".to_string());
+        return Err("未找到 sing-box 可执行文件，且无法生成默认下载地址；请提供 payload.downloadUrl 或检查系统架构".to_string());
     }
 
     let bin_dir = Path::new(&config.agent_home).join("bin");
@@ -1781,7 +1889,72 @@ fn install_or_update_sing_box(config: &Config, agent_command: &AgentCommand, rei
         let _ = fs::copy(&target, backup);
     }
     fs::rename(&next, &target).map_err(|error| format!("cannot install sing-box binary: {error}"))?;
-    Ok(sing_box_install_result(config, &target.to_string_lossy(), "sing-box 程序已安装"))
+    verify_sing_box_binary(&target)?;
+    let service = ensure_sing_box_service(config, &target);
+    let message = format!("sing-box 程序已安装；{}", service.1);
+    Ok(sing_box_install_result(config, &target.to_string_lossy(), &message))
+}
+
+fn verify_sing_box_binary(binary: &Path) -> Result<(), String> {
+    let output = Command::new(binary)
+        .arg("version")
+        .output()
+        .map_err(|error| format!("sing-box 已下载但无法运行：{error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("sing-box 已下载但版本检查失败：{stderr}"))
+    }
+}
+
+fn ensure_sing_box_service(config: &Config, binary: &Path) -> (bool, String) {
+    let config_path = default_sing_box_apply_config_path(config);
+    if command_exists("systemctl") || config.service_mode == "systemd" {
+        let service = format!(
+            "[Unit]\nDescription=sing-box service managed by PulseDeck\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={} run -c {}\nRestart=on-failure\nRestartSec=5s\nLimitNOFILE=1048576\n\n[Install]\nWantedBy=multi-user.target\n",
+            binary.display(),
+            config_path
+        );
+        let path = Path::new("/etc/systemd/system/sing-box.service");
+        if fs::write(path, service).is_ok() {
+            let _ = Command::new("systemctl").arg("daemon-reload").status();
+            let enabled = Command::new("systemctl")
+                .args(["enable", "sing-box.service"])
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            return (enabled, if enabled { "systemd 服务已启用".to_string() } else { "systemd 服务文件已写入，启用失败".to_string() });
+        }
+        return (false, "无法写入 systemd 服务文件".to_string());
+    }
+    if command_exists("rc-service") || config.service_mode == "openrc" {
+        let script = format!(
+            "#!/sbin/openrc-run\nname=\"sing-box\"\ndescription=\"sing-box service managed by PulseDeck\"\ncommand=\"{}\"\ncommand_args=\"run -c {}\"\ncommand_background=true\npidfile=\"/run/sing-box.pid\"\ndepend() {{\n  need net\n}}\n",
+            binary.display(),
+            config_path
+        );
+        let path = Path::new("/etc/init.d/sing-box");
+        if fs::write(path, script).is_ok() && make_executable(path).is_ok() {
+            let enabled = Command::new("rc-update")
+                .args(["add", "sing-box", "default"])
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            return (enabled, if enabled { "OpenRC 服务已启用".to_string() } else { "OpenRC 服务脚本已写入，启用失败".to_string() });
+        }
+        return (false, "无法写入 OpenRC 服务脚本".to_string());
+    }
+    (false, "未检测到可配置的服务管理器".to_string())
+}
+
+fn default_sing_box_apply_config_path(config: &Config) -> String {
+    let system_config = PathBuf::from("/etc/sing-box/config.json");
+    if ensure_parent(&system_config).is_ok() {
+        system_config.to_string_lossy().to_string()
+    } else {
+        sing_box_work_dir(config).join("config.json").to_string_lossy().to_string()
+    }
 }
 
 fn sing_box_install_result(config: &Config, binary: &str, message: &str) -> String {
@@ -2412,6 +2585,9 @@ fn find_sing_box_binary() -> Option<String> {
             return Some(path);
         }
     }
+    if let Some(path) = installed_sing_box_path() {
+        return Some(path);
+    }
     if let Some(path) = find_command_path("sing-box") {
         return Some(path);
     }
@@ -2421,6 +2597,24 @@ fn find_sing_box_binary() -> Option<String> {
         }
     }
     None
+}
+
+fn installed_sing_box_path() -> Option<String> {
+    if let Ok(home) = env::var("PULSEDECK_AGENT_HOME") {
+        let path = Path::new(&home).join("bin/sing-box");
+        if path.is_file() {
+            return Some(path.to_string_lossy().to_string());
+        }
+    }
+    let config_path = find_config_path();
+    let raw = fs::read_to_string(&config_path).unwrap_or_default();
+    let agent_home = json_get_string(&raw, "agentHome").unwrap_or_else(|| parent_parent(&config_path));
+    let path = Path::new(&agent_home).join("bin/sing-box");
+    if path.is_file() {
+        Some(path.to_string_lossy().to_string())
+    } else {
+        None
+    }
 }
 
 fn find_command_path(name: &str) -> Option<String> {

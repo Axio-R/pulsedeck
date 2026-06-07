@@ -93,6 +93,8 @@ export interface PulseNode {
   network: {
     primaryIpv4: string | null;
     primaryIpv6: string | null;
+    warpIpv4: string | null;
+    warpIpv6: string | null;
     ipMode: string;
     publicAddresses: Array<{ interface: string; family: string; address: string; cidr?: string; region?: string; countryCode?: string; city?: string; source?: string }>;
     warpLikely: boolean;

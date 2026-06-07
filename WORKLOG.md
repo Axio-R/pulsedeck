@@ -86,6 +86,27 @@ This file is the source of truth for the new PulseDeck project. Keep it separate
 ### 2026-06-07
 
 - Implementation direction for this turn:
+  - Fix the live node issues reported from a WARP IPv4 plus native IPv6 VPS.
+  - Remove duplicated region components such as `HK · Hong Kong · Hong Kong`.
+  - Keep native IPv4, native IPv6, WARP IPv4, and WARP IPv6 distinct in API data and node card display.
+  - Make `sing-box-install` work with an empty payload by providing a sensible default release version and Agent-managed binary path.
+  - Prepare the project metadata for `v0.2.7`.
+- Implementation completed before commit:
+  - Bumped panel and Agent metadata to `0.2.7` / `0.2.7-rust`.
+  - Added region-label compaction on network discovery and node presentation so country/region/city duplicates are not repeated in the panel.
+  - Marked panel remote IPs separately from native interface IPs, added Agent public IPv4/IPv6 lookup rows, and taught discovery to expose `network.warpIpv4` / `network.warpIpv6` without treating WARP public IPv4 as native IPv4.
+  - Updated node card IP rows so WARP uses WARP public fields and filters private tunnel addresses like `172.16.0.2`; native IPv4 now stays empty when the server has no native IPv4.
+  - Added a default sing-box release version, configurable release base URL, installed binary lookup under the Agent home, binary verification, and best-effort systemd/OpenRC service creation after install.
+  - Added API test coverage for the WARP IPv4 plus native IPv6 discovery case.
+- Local verification before commit:
+  - `npm run check:api`: passed.
+  - `npm test`: passed, 14 tests.
+  - `corepack pnpm typecheck`: passed.
+  - `corepack pnpm build`: passed.
+  - `git diff --check`: passed after cleaning generated router typing whitespace.
+  - `cargo check --manifest-path apps/agent/Cargo.toml`: not run because this machine still has no `cargo`; Rust compilation must be validated by GitHub Actions/GHCR.
+
+- Implementation direction for this turn:
   - Complete priority modules 1/2/3 before moving to later optional modules.
   - Add persistent lightweight traffic history, traffic rank, manual reset, and cycle reset policy fields.
   - Add a bidirectional Agent control channel while preserving HTTP command polling as compatibility fallback.
